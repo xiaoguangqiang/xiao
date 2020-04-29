@@ -1,0 +1,208 @@
+# -*- coding: utf-8 -*-
+"""
+Spyder Editor
+
+This is a temporary script file.
+"""
+import torch
+import torch.nn as nn
+import numpy as np
+import matplotlib.pyplot as plt
+import time
+import argparse
+
+def f(x,y):#微分方程的右边函数f
+    return - (2*np.pi**2)*np.exp(np.pi*(x + y))*np.sin(np.pi*(x + y))
+def u_accuracy(x,y):
+    return np.exp(np.pi*(x + y))*np.sin(np.pi*x)*np.sin(np.pi*y)
+def u_boundary(x,y):
+    return 0*x*y
+#定义内部点
+class InSet():
+    def __init__(self):
+        self.dim = 2
+        self.xa,self.xb,self.ya,self.yb = 0,1,0,1
+        self.area = (self.xb - self.xa)*(self.yb - self.ya)
+        self.nx,self.ny = 20,30
+        self.hx = (self.xb - self.xa)/self.nx
+        self.hy = (self.yb - self.ya)/self.ny
+        self.size = self.nx*self.ny
+        self.X = torch.zeros(self.size,self.dim)
+        for i in range(self.nx):
+            for j in range(self.ny):
+                self.X[i*self.ny + j,0] = self.xa + (i + 0.5)*self.hx
+                self.X[i*self.ny + j,1] = self.ya + (j + 0.5)*self.hy
+        self.u_acc = u_accuracy(self.X[:,0],self.X[:,1]).view(-1,1)
+        self.right = f(self.X[:,0],self.X[:,1]).view(-1,1)
+ #定义边界点       
+class BoundSet():
+    def __init__(self):
+        self.dim = 2
+        self.xa,self.xb,self.ya,self.yb = 0,1,0,1
+        self.area = (self.xb - self.xa)*(self.yb - self.ya)
+        self.length = 2*((self.xb - self.xa) + (self.yb - self.ya))
+        self.nx,self.ny = 20,30
+        self.hx = (self.xb - self.xa)/self.nx
+        self.hy = (self.yb - self.ya)/self.ny
+        self.size = 2*(self.nx + self.ny)
+        self.X = torch.zeros(self.size,self.dim)
+        for i in range(self.nx):
+            for j in range(self.ny):
+                self.X[i,0] = self.xa + (i + 0.5)*self.hx
+                self.X[i,1] = self.ya
+                self.X[self.nx + j,0] = self.xb
+                self.X[self.nx + j,1] = self.ya + (j + 0.5)*self.hy
+                self.X[self.nx + self.ny + i,0] = self.xb - self.xa - (i + 0.5)*self.hx
+                self.X[self.nx + self.ny + i,1] = self.yb
+                self.X[2*self.nx + self.ny + j,0] = self.xa
+                self.X[2*self.nx + self.ny + j,1] = self.yb - self.ya - (j + 0.5)*self.hy
+        self.right = u_boundary(self.X[:,0],self.X[:,1]).view(-1,1)
+#定义测试集
+class TestSet():
+    def __init__(self):
+        self.dim = 2
+        self.xa,self.xb,self.ya,self.yb = 0,1,0,1
+        self.hx = 0.1
+        self.hy = 0.05
+        self.nx = int((self.xb - self.xa)/self.hx) + 1
+        self.ny = int((self.yb - self.ya)/self.hy) + 1
+        self.size = self.nx*self.ny
+        self.X = torch.zeros(self.size,self.dim)
+        for j in range(self.ny):
+            for i in range(self.nx):
+                self.X[j*self.nx + i,0] = self.xa + i*self.hx
+                self.X[j*self.nx + i,1] = self.ya + j*self.hy
+        self.u_acc = u_accuracy(self.X[:,0],self.X[:,1]).view(-1,1)
+#定义神经网络架构        
+np.random.seed(1234)
+torch.manual_seed(1234)
+class Res(nn.Module):
+    def __init__(self,input_size,output_size):
+        super(Res,self).__init__()
+        self.model = nn.Sequential(
+            nn.Linear(input_size,output_size),
+            nn.Tanh(),
+            nn.Linear(output_size,output_size),
+            nn.LeakyReLU(inplace = True)
+          
+        )
+        self.input = input_size
+        self.output = output_size
+    def forward(self,x):
+        x = self.model(x) + x@torch.eye(x.shape[1],self.output)
+        return x
+class NET(nn.Module):
+    def __init__(self):
+        super(NET,self).__init__()
+        self.model = nn.Sequential(
+            Res(2,20),
+            Res(20,10),
+            Res(10,20),
+            Res(20,1)
+        )
+        
+    def forward(self,x):
+        return self.model(x)
+#定义误差函数
+def train_error(u_acc,u_pred):
+     fenzi = ((u_acc - u_pred)**2).sum()
+     fenmu = (u_acc**2 + 1e-7).sum()
+     return np.sqrt(fenzi/fenmu)
+
+#定义损失函数
+'''
+def LOSS(NET,InSet,BoundSet,belta):
+    
+    InSet.X.requires_grad = True
+    U_in = NET(InSet.X)
+    Ux, = torch.autograd.grad(U_in,InSet.X,create_graph = True,retain_graph = True,
+                             grad_outputs = torch.ones(InSet.size,1))
+    
+    Uxx1, = torch.autograd.grad(Ux[:,0:1],InSet.X,create_graph = True,retain_graph = True,
+                               grad_outputs = torch.ones(InSet.size,1))
+    
+    Uxx2, = torch.autograd.grad(Ux[:,1:2],InSet.X,create_graph = True,retain_graph = True,
+                               grad_outputs = torch.ones(InSet.size,1))
+    
+    U_b = NET(BoundSet.X)
+    return InSet.area*((-Uxx1[:,0:1] - Uxx2[:,1:2] - InSet.right)**2).mean()\
+             + belta*BoundSet.length*((BoundSet.right - U_b)**2).mean()
+'''
+def LOSS(NET,InSet,BoundSet,belta):
+    InSet.X.requires_grad = True
+    U_in = NET(InSet.X)
+    Ux, = torch.autograd.grad(U_in,InSet.X,create_graph = True,retain_graph = True,
+                             grad_outputs = torch.ones(InSet.size,1))
+    U_b = NET(BoundSet.X)
+    return 0.5*(Ux[:,0:1]**2 + Ux[:,1:2]**2 - 2*InSet.right*U_in).sum()\
+            + belta*((BoundSet.right - U_b)**2).sum()
+def test_error(NET,InSet):
+    
+    fenzi = (((NET(InSet.X) - InSet.u_acc)**2).sum())**(0.5)
+    fenmu = ((InSet.u_acc**2 + 1e-7).sum())**(0.5)
+    return fenzi/fenmu
+
+def Train(NET,InSet,BoundSet,belta,optim,epochs):
+    for i in range(epochs):
+        start_time = time.time()
+        print('train neural network')
+        loss = LOSS(NET,InSet,BoundSet,belta)
+        loss_optimal = loss
+        
+        step = 300
+        #training
+        for j in range(step):
+            optim.zero_grad()
+            loss = LOSS(NET,InSet,BoundSet,belta)
+            loss.backward()
+            optim.step()
+            record = 50#record the train output
+            if j%record == 0:
+                TEST_ERROR = test_error(NET,InSet)
+                print('epochs:%d,train step = %d,loss = %.3e,error:%.3f'
+                      %(i,j,loss.item(),TEST_ERROR.item()))
+                if loss < loss_optimal:
+                    loss_optimal = loss
+                    torch.save(NET.state_dict(),'optimal_best.mdl')
+                   
+        TEST_ERROR = test_error(NET,InSet)
+        end_time = time.time()
+        print('epochs:%d,step:%d,loss:%.3e\n'
+              %(i,(i+1)*step,loss.item()))
+        print('train time:%.2f'%(end_time - start_time))
+        print('train error:%.3f'%(TEST_ERROR.item()))
+        print('-------------------------------------------------------------')
+tic = time.time()
+NET = NET()
+InSet = InSet()
+BoundSet = BoundSet()
+parser = argparse.ArgumentParser(description='Least-Squares Neural Network Method')
+parser.add_argument('--belta', type=int, default=5e3, metavar='B',
+                    help='penalty coefficent')
+parser.add_argument('--epochs', type=int, default=2, metavar='N',
+                    help='number of epochs to train')
+parser.add_argument('--lr', type=float, default=0.005, metavar='LR',
+                    help='learning rate')
+
+args = parser.parse_args()
+optim = torch.optim.Adam(NET.parameters(),lr = 5e-3)
+Train(NET,InSet,BoundSet,args.belta,optim,args.epochs)
+toc = time.time()
+print('the time used:{}'.format(toc - tic))
+NET.load_state_dict(torch.load('optimal_best.mdl'))
+TestSet = TestSet()
+u_pred = NET(TestSet.X).detach().numpy()
+u_acc = TestSet.u_acc.numpy()
+print('the test error = {}'.format(train_error(u_acc,u_pred)))
+M = TestSet.nx
+N = TestSet.ny
+
+x_train = np.linspace(TestSet.xa,TestSet.xb,M)
+y_train = np.linspace(TestSet.ya,TestSet.yb,N)
+
+x,y = np.meshgrid(x_train,y_train)
+plt.contourf(x,y,u_pred.reshape(M,N).T,40,cmap = 'Blues')
+plt.colorbar()
+plt.xlabel('x')
+plt.ylabel('y')
+plt.title('numerical solution')
