@@ -1,0 +1,243 @@
+import tensorflow as tf
+import numpy as np
+import matplotlib.pyplot as plt
+import time
+np.random.seed(1234)
+tf.compat.v1.set_random_seed(1234)
+def f(x,y):#微分方程的右边函数f
+    return - (2*np.pi**2)*np.exp(np.pi*(x + y))*np.sin(np.pi*(x + y))
+def u_accuracy(x,y):#定义精确解
+    return np.exp(np.pi*(x + y))*np.sin(np.pi*x)*np.sin(np.pi*y)
+def u_boundary(x,y):#定义边界函数
+    return 0*x*y
+#定义内部点
+class INSET():#定义训练集，包含区域内部点
+    def __init__(self):
+        self.dim = 2
+        self.xa,self.xb,self.ya,self.yb = 0,1,0,1
+        self.area = (self.xb - self.xa)*(self.yb - self.ya)
+        self.nx,self.ny = 20,30
+        self.hx = (self.xb - self.xa)/self.nx
+        self.hy = (self.yb - self.ya)/self.ny
+        self.size = self.nx*self.ny
+        self.X = np.zeros([self.size,self.dim])
+        for i in range(self.nx):
+            for j in range(self.ny):
+                self.X[i*self.ny + j,0] = self.xa + (i + 0.5)*self.hx
+                self.X[i*self.ny + j,1] = self.ya + (j + 0.5)*self.hy
+        self.u_acc = u_accuracy(self.X[:,0],self.X[:,1]).reshape(-1,1)#内部点精确解
+        self.right = f(self.X[:,0],self.X[:,1]).reshape(-1,1)#针对内部点的右边项
+ #定义边界点       
+class BDSET():#定义训练集，包含区域边界点
+    def __init__(self):
+        self.dim = 2
+        self.xa,self.xb,self.ya,self.yb = 0,1,0,1
+        self.area = (self.xb - self.xa)*(self.yb - self.ya)
+        self.length = 2*((self.xb - self.xa) + (self.yb - self.ya))
+        self.nx,self.ny = 20,30
+        self.hx = (self.xb - self.xa)/self.nx
+        self.hy = (self.yb - self.ya)/self.ny
+        self.size = 2*(self.nx + self.ny)
+        self.X = np.zeros([self.size,self.dim])
+        for i in range(self.nx):
+            for j in range(self.ny):
+                self.X[i,0] = self.xa + (i + 0.5)*self.hx
+                self.X[i,1] = self.ya
+                self.X[self.nx + j,0] = self.xb
+                self.X[self.nx + j,1] = self.ya + (j + 0.5)*self.hy
+                self.X[self.nx + self.ny + i,0] = self.xb - self.xa - (i + 0.5)*self.hx
+                self.X[self.nx + self.ny + i,1] = self.yb
+                self.X[2*self.nx + self.ny + j,0] = self.xa
+                self.X[2*self.nx + self.ny + j,1] = self.yb - self.ya - (j + 0.5)*self.hy
+        self.u_acc = u_boundary(self.X[:,0],self.X[:,1]).reshape(-1,1)#边界点精确解
+#定义测试集
+class TESET():#定义测试集
+    def __init__(self):
+        self.dim = 2
+        self.xa,self.xb,self.ya,self.yb = 0,1,0,1
+        self.hx = 0.1
+        self.hy = 0.05
+        self.nx = int((self.xb - self.xa)/self.hx) + 1
+        self.ny = int((self.yb - self.ya)/self.hx) + 1
+        self.size = self.nx*self.ny
+        self.X = np.zeros([self.size,self.dim])
+        for j in range(self.ny):
+            for i in range(self.nx):
+                self.X[j*self.nx + i,0] = self.xa + i*self.hx
+                self.X[j*self.nx + i,1] = self.ya + j*self.hy
+        self.u_acc = u_accuracy(self.X[:,0],self.X[:,1]).reshape(-1,1)#精确解
+
+class NN:
+    def __init__(self,inset,bdset,layers,belta):
+        self.inset = inset#准备传入训练集内部点
+        self.bdset = bdset#准备传入训练集边界点
+        self.datamin = np.array([[inset.xa,inset.ya]])
+        self.datamax = np.array([[inset.xb,inset.yb]])
+       
+        self.layers = layers#准备传入神经元层
+        
+        self.inset_x_tf = tf.compat.v1.placeholder(tf.float32,shape = [None,2])#准备传入训练集内部点
+        self.bdset_x_tf = tf.compat.v1.placeholder(tf.float32,shape = [None,2])#准备传入训练集边界点
+        self.right_tf = tf.compat.v1.placeholder(tf.float32,shape = [None,1])#准备传入训练集内部点右边项
+        self.ub_tf = tf.compat.v1.placeholder(tf.float32,shape = [None,1])#准备传入训练集边界点函数值
+        self.min = tf.compat.v1.placeholder(tf.float32,shape = [None,2])#准备数据集两个轴的下限
+        self.max = tf.compat.v1.placeholder(tf.float32,shape = [None,2])#准备数据集两个轴的上线限
+        self.feed = {self.inset_x_tf:inset.X,self.bdset_x_tf:bdset.X,
+                     self.right_tf:inset.right,self.ub_tf:bdset.u_acc,
+                     self.min:datamin,self.max:datamax}#准备喂数据集
+        self.Hin = 2*(self.inset_x_tf - self.min)/(self.max - self.min) - 1#正规化处理
+        self.Hbd = 2*(self.bdset_x_tf - self.min)/(self.max - self.min) - 1#正规化处理
+        self.weights,self.biases = self.NNinit()#通过函数NNinit完成权重，偏置初始化
+        self.u_in = self.NNU(self.Hin)#通过函数NNU完成计算，也就是训练集内部点的近似值
+        self.u_b = self.NNU(self.Hbd)#通过函数NNU完成计算，也就是训练集边界点的近似值
+       
+        self.ux,self.uy = self.u_grad(self.inset_x_tf)#通过u_grad得到训练集内部点的一阶偏导数
+        self.loss_in = tf.reduce_mean(tf.square(self.ux) + tf.square(self.uy)) -\
+        tf.reduce_mean(2*self.u_in*self.right_tf)#通过极小位能原理得到的针对内部点的损失函数
+        self.loss_b = tf.reduce_mean(tf.square(self.u_b - self.ub_tf))#针对边界点的损失函数
+        self.loss = self.loss_in + belta*self.loss_b#总的损失函数
+        
+        self.optim = tf.compat.v1.train.AdamOptimizer(learning_rate = 5e-3)#准备优化器
+        self.minimizer = self.optim.minimize(self.loss)
+        '''
+        config=tf.compat.v1.ConfigProto(allow_soft_placement=True,
+                                       log_device_placement=True)
+        self.sess = tf.compat.v1.Session(config)
+        '''
+        self.sess = tf.compat.v1.Session()#创建会话
+        init =  tf.compat.v1.global_variables_initializer()#初始化变量
+        self.sess.run(init)
+        
+    def w_init(self,in_dim,out_dim):#初始化权重
+        w_std = np.sqrt(2/(in_dim + out_dim))
+        return tf.Variable(tf.random.truncated_normal([in_dim, out_dim], stddev = w_std), dtype=tf.float32)
+    def NNinit(self):#初始化权重，偏置
+        weights = []
+        biases = []
+        num = len(self.layers)
+        for i in range(0,num - 1):
+            w = self.w_init(in_dim = self.layers[i],out_dim = self.layers[i + 1])
+            b = tf.Variable(tf.random.truncated_normal([1,self.layers[i + 1]], dtype = tf.float32), dtype=tf.float32)
+            weights.append(w)
+            biases.append(b)
+        return weights,biases
+    def NNU(self,Input):#计算神经网络输出
+        Input = tf.cast(Input,tf.float32)
+        weights,biases = self.NNinit()
+        num = len(weights)
+        for i in range(0,num - 1):
+            w,b = weights[i],biases[i]
+            Input = tf.tanh(tf.add(tf.matmul(Input,w),b))
+        W,B = weights[-1],biases[-1]
+        return tf.add(tf.matmul(Input,W),B)
+    def u_grad(self,Input):#计算梯度
+        Input = tf.cast(Input,tf.float32)
+        u = self.NNU(Input)
+        ux = tf.gradients(u,Input)[0][:,0:1]
+        uy = tf.gradients(u,Input)[0][:,1:2] 
+        return ux,uy
+    def ERROR(self):#定义训练集精确解和近似解的误差
+        fenzi_in = tf.reduce_mean(tf.square(self.u_in - self.inset.u_acc))
+        fenzi_b = tf.reduce_mean(tf.square(self.u_b - self.bdset.u_acc))
+        fenmu_in = tf.reduce_mean(tf.square(self.u_in))
+        fenmu_b = tf.reduce_mean(tf.square(self.u_b))
+        fenzi = fenzi_in + fenzi_b
+        fenmu = fenmu_in + fenmu_b
+        return tf.sqrt(fenzi/fenmu)
+    
+    def train(self,step):#定义训练过程
+        print('train the neural network')
+        st_time = time.time() 
+        LOSS = self.sess.run(self.loss,feed_dict = self.feed)
+        loss_best = LOSS
+        weights_best = self.sess.run(self.weights)
+        biases_best = self.sess.run(self.biases)
+        record = 400
+        for j in range(step):
+            self.sess.run(self.minimizer,feed_dict = self.feed)#优化过程
+            if j%record == 0:
+                error = self.sess.run(self.ERROR(),feed_dict = self.feed)
+                LOSS = self.sess.run(self.loss,feed_dict = self.feed)
+                print('train step:%d,loss:%.2f,error:%.2f'
+                      %(j,LOSS,error))#打印损失函数，训练集误差
+                
+                if LOSS < loss_best:
+                    loss_best = LOSS
+                    weights_best = self.sess.run(self.weights)#准备保存最优权重
+                    biases_best = self.sess.run(self.biases)#准备保存最优偏置
+                
+        epo_time = time.time() - st_time
+        print('one epoch used:%.2f'%(epo_time))
+        print('------------------------------------------------')
+       
+    def trainbatch(self,step):#尝试使用batch输入以提高精度，减少时间
+        print('train the neural network')
+        st_time = time.time() 
+        batch = self.inset.nx
+        LOSS = self.sess.run(self.loss,feed_dict = self.feed)
+        loss_best = LOSS
+        weights_best = self.sess.run(self.weights)
+        biases_best = self.sess.run(self.biases)
+        record = 100
+        for j in range(step):
+            x = i*batch%len(self.inset.X)
+            y = x + batch
+            feed = {self.inset_x_tf:inset.X[x:y],self.bdset_x_tf:bdset.X,
+                    self.right_tf:inset.right[x:y],self.ub_tf:bdset.u_acc,
+                    self.min:datamin,self.max:datamax}
+            self.sess.run(self.minimizer,feed_dict = feed)
+            if j%record == 0:
+                error = self.sess.run(self.ERROR(),feed_dict = self.feed)
+                LOSS = self.sess.run(self.loss,feed_dict = self.feed)
+                print('train step:%d,loss:%.2f,error:%.2f'
+                      %(j,LOSS,error))
+                '''
+                if LOSS < loss_best:
+                    loss_best = LOSS
+                    weights_best = self.sess.run(self.weights)
+                    biases_best = self.sess.run(self.biases)
+                '''
+        epo_time = time.time() - st_time
+        print('one epoch used:%.2f'%(epo_time))
+        print('------------------------------------------------')
+       
+inset = INSET()
+bdset = BDSET()
+teset = TESET()
+layers = [2,20,10,1]
+belta = 5e3
+#datamin = np.array([[teset.xa,teset.ya]])
+#datamax = np.array([[teset.xb,teset.yb]])
+ne = NN(inset,bdset,layers,belta)#对类进行实例化
+epochs = 3
+st = time.time()
+for i in range(epochs):#开始训练
+    print('epochs:%d'%(i))
+    #ne.trainbatch(500)
+    ne.train(2000)
+ed = time.time()
+print('all used time:%.2f'%(ed - st))
+
+#预测函数近似值和误差
+feed = {ne.inset_x_tf:teset.X,ne.min:datamin,ne.max:datamax}
+u_pred = ne.sess.run(ne.u_in,feed_dict = feed)#利用类NN中的u_in来计算测试集上的近似值
+u_acc = np.array(teset.u_acc,dtype = np.float32)#拿出测试集中精确解
+def LERROR(u_pred,u_acc):
+    fenzi = np.square(u_pred - u_acc).sum()
+    fenmu = (np.square(u_acc) + 1e-7).sum()
+    return np.sqrt(fenzi/fenmu)
+
+print('the test error:%.3f'%(LERROR(u_pred,u_acc)))#打印测试上的误差
+
+M = teset.nx
+N = teset.ny
+
+x_train = np.linspace(teset.xa,teset.xb,M)
+y_train = np.linspace(teset.ya,teset.yb,N)
+
+x,y = np.meshgrid(x_train,y_train)
+plt.contourf(x,y,u_pred.reshape(M,N).T,40,cmap = 'Blues')#画出图像
+plt.colorbar()
+plt.xlabel('x')
+plt.ylabel('y')
+plt.title('numerical solution')
