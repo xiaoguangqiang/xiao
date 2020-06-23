@@ -1,0 +1,261 @@
+import torch
+import torch.nn as nn
+import numpy as np
+import matplotlib.pyplot as plt
+import time
+np.random.seed(1234)
+torch.manual_seed(1234)
+class Res(nn.Module):
+    def __init__(self,input_size,output_size):
+        super(Res,self).__init__()
+        self.model = nn.Sequential(
+            nn.Linear(input_size,output_size),
+            nn.Sigmoid()
+        )
+        self.input = input_size
+        self.output = output_size
+    def forward(self,x):
+        x = self.model(x)
+        return x
+class NET(nn.Module):
+    def __init__(self,insize,hidsize,outsize):
+        super(NET,self).__init__()
+        self.model = nn.Sequential(
+            Res(insize,hidsize),
+            Res(hidsize,hidsize),
+            Res(hidsize,outsize)
+        )   
+        self.mod = nn.Sequential(
+            Res(insize,hidsize),
+            Res(hidsize,outsize)
+        )
+    def forward(self,x):
+        return self.model(x)
+    def forwa(self,x):
+        return self.mod(x)
+xa,xb = 0,1
+ya,yb = 0,1
+def f(x,y):
+    return np.exp(-x)*(x - 2 + y**3 + 6*y)
+def u_accuracy(x,y):
+    return np.exp(-x)*(x + y**3)
+def kernel(x,y):
+    LD = (x - xa)*(x - xb)*(y - ya)*(y - yb)
+    return LD
+dim = 6
+class INSET():
+    def __init__(self):
+        
+        self.xa,self.xb = xa,xb
+        self.ya,self.yb = ya,yb
+        self.nx,self.ny = 20,30
+        self.hx = (self.xb - self.xa)/self.nx
+        self.hy = (self.yb - self.ya)/self.ny
+        self.size = self.nx*self.ny
+        self.X = torch.zeros(self.size,dim)
+        for i in range(self.nx):
+            for j in range(self.ny):
+                self.X[i*self.ny + j,0] = self.xa + (i + 0.5)*self.hx
+                self.X[i*self.ny + j,1] = self.ya + (j + 0.5)*self.hy
+        self.u_acc = u_accuracy(self.X[:,0],self.X[:,1]).view(-1,1)
+        self.right = f(self.X[:,0],self.X[:,1]).view(-1,1)
+        self.ker = kernel(self.X[:,0],self.X[:,1]).view(-1,1)
+        
+class BDSET():
+    def __init__(self):
+        
+        self.xa,self.xb = xa,xb
+        self.ya,self.yb = ya,yb
+        self.nx,self.ny = 20,30
+        self.hx = (self.xb - self.xa)/self.nx
+        self.hy = (self.yb - self.ya)/self.ny
+        self.size = 2*(self.nx + self.ny)
+        self.X = torch.zeros(self.size,dim)
+        self.ub = torch.zeros(self.size,1)
+        for i in range(self.nx):
+            for j in range(self.ny):
+                self.X[i,0] = self.xa + (i + 0.5)*self.hx
+                self.X[i,1] = self.ya
+                x,y = self.xa + (i + 0.5)*self.hx,self.ya
+                self.ub[i] = x*np.exp(-x) # y = ya
+                self.X[self.nx + j,0] = self.xb
+                self.X[self.nx + j,1] = self.ya + (j + 0.5)*self.hy
+                x,y = self.xb,self.ya + (j + 0.5)*self.hy
+                self.ub[self.nx + j] = (1 + y**3)*np.exp(-1) # x = xb
+                self.X[self.nx + self.ny + i,0] = self.xb - self.xa - (i + 0.5)*self.hx
+                self.X[self.nx + self.ny + i,1] = self.yb
+                x,y = self.xb - self.xa - (i + 0.5)*self.hx,self.yb
+                self.ub[self.nx + self.ny + i] = (x + 1)*np.exp(-x) # y = yb
+                self.X[2*self.nx + self.ny + j,0] = self.xa
+                self.X[2*self.nx + self.ny + j,1] = self.yb - self.ya - (j + 0.5)*self.hy
+                x,y = self.xa,self.yb - self.ya - (j + 0.5)*self.hy
+                self.ub[2*self.nx + self.ny + j] = y**3 # x = xa
+        self.ker = kernel(self.X[:,0],self.X[:,1]).view(-1,1)
+        
+        
+class TESET():
+    def __init__(self):
+        
+        self.xa,self.xb = xa,xb
+        self.ya,self.yb = ya,yb
+        self.hx = 0.1
+        self.hy = 0.05
+        self.nx = int((self.xb - self.xa)/self.hx) + 1
+        self.ny = int((self.yb - self.ya)/self.hy) + 1
+        self.size = self.nx*self.ny
+        self.X = torch.zeros(self.size,dim)
+        for j in range(self.ny):
+            for i in range(self.nx):
+                self.X[j*self.nx + i,0] = self.xa + i*self.hx
+                self.X[j*self.nx + i,1] = self.ya + j*self.hy
+        self.u_acc = u_accuracy(self.X[:,0],self.X[:,1]).view(-1,1)
+        self.ker = kernel(self.X[:,0],self.X[:,1]).view(-1,1)
+mi = torch.zeros(1,dim).float()
+ma = (1e-5)*torch.ones(1,dim).float()
+mi[0,0],mi[0,1] = xa,ya
+ma[0,0],ma[0,1] = xb,yb
+newnet = NET(dim,5,1)
+
+inset = INSET()
+bdset = BDSET()
+teset = TESET()
+optim = torch.optim.Adam(newnet.parameters(),lr = 5e-3)
+belta = 5e2
+epochs = 3
+step = 500
+record = 250
+
+def newpred(net,model):
+    H = 0.4*(2*(model.X - mi)/(ma - mi) - 1)
+    return net.forward(H)*model.ker + net.forwa(model.X)
+def newerror(net,model):
+    fenzi = ((newpred(net,model) - model.u_acc)**2).detach().numpy().sum()
+    fenmu = (model.u_acc**2 + 1e-8).detach().numpy().sum()
+    return np.sqrt(fenzi/fenmu)
+def NEWLOSS(net,inset,bdset,belta):
+    x_in = inset.X
+    x_in.requires_grad = True
+    u_in = newpred(net,inset)
+    ux, = torch.autograd.grad(u_in,x_in,create_graph = True,retain_graph = True,
+                                  grad_outputs = torch.ones(inset.size,1))
+    ub = newpred(net,bdset)
+    return 0.5*(ux[:,0:1]**2 + ux[:,1:2]**2 - 2*inset.right*u_in).sum()\
+            + belta*((bdset.ub - ub)**2).sum()\
+            + belta*((bdset.ub - net.forwa(bdset.X))**2).sum()
+def newtrain(net,inset,bdset,teset,belta,optim,epochs,step,record):
+    stime = time.time()
+    BUZHOU = []
+    ERROR = []
+    for i in range(epochs):
+        print('train neural network')
+        st = time.time()
+        for j in range(step):
+            optim.zero_grad()
+            loss = NEWLOSS(net,inset,bdset,belta)
+            loss.backward()
+            optim.step()
+            if j%record == 0:
+                trainerror = newerror(net,inset)
+                teseterror = newerror(net,teset)
+                BUZHOU.append(j + i*step)
+                ERROR.append(teseterror)
+                print('epoch:%d,step:%d,loss:%.3e,train error:%.3f'%
+                      (i,j,loss.item(),trainerror))
+        alt = time.time() - st
+        print('one epoch use time:%.2f,test error:%.3f'%
+             (alt,newerror(net,teset)))
+        print('-----------------------------------------------------')
+    traintime = time.time() - stime
+    print('train use time:%.2f'%(traintime))
+    return BUZHOU,ERROR
+
+BUZHOU,NEWERROR = newtrain(newnet,inset,bdset,teset,belta,optim,epochs,step,record)
+M,N = teset.nx,teset.ny
+x_train = np.linspace(teset.xa,teset.xb,M)
+y_train = np.linspace(teset.ya,teset.yb,N)
+x,y = np.meshgrid(x_train,y_train)
+u_pred = newpred(newnet,teset).detach().numpy().reshape(N,M)
+plt.contourf(x,y,u_pred,40,cmap = 'Blues')
+plt.colorbar()
+plt.xlabel('x')
+plt.ylabel('y')
+plt.title('the new solution')
+plt.savefig('new.jpg')
+def pred(net,model):
+    return net.forward(model.X)
+def error(net,model):
+    fenzi = ((pred(net,model) - model.u_acc)**2).detach().numpy().sum()
+    fenmu = (model.u_acc**2 + 1e-7).detach().numpy().sum()
+    return np.sqrt(fenzi/fenmu)
+def LOSS(net,inset,bdset,belta):
+    x_in = inset.X
+    x_in.requires_grad = True
+    u_in = pred(net,inset)
+    ux, = torch.autograd.grad(u_in,x_in,create_graph = True,retain_graph = True,
+                                  grad_outputs = torch.ones(inset.size,1))
+    ub = pred(net,bdset)
+    return 0.5*(ux[:,0:1]**2 + ux[:,1:2]**2 - 2*inset.right*u_in).sum()\
+            + belta*((bdset.ub - ub)**2).sum()
+def train(net,inset,bdset,teset,belta,optim,epochs,step,record):
+    stime = time.time()
+    BUZHOU = []
+    ERROR = []
+    for i in range(epochs):
+        print('train neural network')
+        st = time.time()
+        for j in range(step):
+            optim.zero_grad()
+            loss = LOSS(net,inset,bdset,belta)
+            loss.backward()
+            optim.step()
+            if j%record == 0:
+                trainerror = error(net,inset)
+                teseterror = error(net,teset)
+                BUZHOU.append(j + i*step)
+                ERROR.append(teseterror)
+                print('epoch:%d,step:%d,loss:%.3e,train error:%.3f'%
+                      (i,j,loss.item(),trainerror))
+        alt = time.time() - st
+        print('one epoch use time:%.2f,test error:%.3f'%
+             (alt,error(net,teset)))
+        print('-----------------------------------------------------')
+    traintime = time.time() - stime
+    print('train use time:%.2f'%(traintime))
+    return BUZHOU,ERROR
+net = NET(dim,5,1)
+inset = INSET()
+bdset = BDSET()
+teset = TESET()
+optim = torch.optim.Adam(net.parameters(),lr = 5e-3)
+
+
+BUZHOU,OLDERROR = train(net,inset,bdset,teset,belta,optim,epochs,step,record)
+M,N = teset.nx,teset.ny
+x_train = np.linspace(teset.xa,teset.xb,M)
+y_train = np.linspace(teset.ya,teset.yb,N)
+x,y = np.meshgrid(x_train,y_train)
+u_pred = pred(net,teset).detach().numpy().reshape(N,M)
+plt.contourf(x,y,u_pred,40,cmap = 'Blues')
+plt.colorbar()
+plt.xlabel('x')
+plt.ylabel('y')
+plt.title('DRM solution')
+plt.savefig('DRM.jpg')
+M,N = teset.nx,teset.ny
+x_train = np.linspace(teset.xa,teset.xb,M)
+y_train = np.linspace(teset.ya,teset.yb,N)
+x,y = np.meshgrid(x_train,y_train)
+u_acc = teset.u_acc.view(N,M)
+plt.contourf(x,y,u_acc,40,cmap = 'Blues')
+plt.colorbar()
+plt.xlabel('x')
+plt.ylabel('y')
+plt.title('accuracy solution')
+plt.plot(BUZHOU,OLDERROR,'r*')
+plt.plot(BUZHOU,OLDERROR,'b-',label = 'DRM',linewidth = 2)
+plt.plot(BUZHOU,NEWERROR,'ko')
+plt.plot(BUZHOU,NEWERROR,'g-',label = 'new method',linewidth = 2)
+plt.xlabel('epoch')
+plt.ylabel('error')
+plt.legend()
+plt.savefig('error.jpg')
