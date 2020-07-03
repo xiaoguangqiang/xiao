@@ -1,0 +1,121 @@
+import torch
+import torch.nn as nn
+import numpy as np
+import matplotlib.pyplot as plt
+import time
+np.random.seed(1234)
+torch.manual_seed(1234)
+def f(x):
+    return 0*x[:,0]
+def u_accuracy(x):
+    out = 0
+    for i in range(int(x.size(1)/2)):
+        out += x[:,2*i]*x[:,2*i + 1]
+    return out  
+def u_boundary(x):
+    out = 0
+    for i in range(int(x.size(1)/2)):
+        out += x[:,2*i]*x[:,2*i + 1]
+    return out  
+dim = 10
+class INSET():
+    def __init__(self):
+        self.size = 600
+        self.X = torch.rand(self.size,dim)
+        self.u_acc = u_accuracy(self.X).view(-1,1)
+        self.right = f(self.X).view(-1,1)
+class BDSET():
+     def __init__(self):
+        self.rock = 40
+        self.ro = 10
+        self.size = self.rock*dim
+        self.X = torch.rand(self.size,dim)
+        for i in range(dim):
+            self.X[i*self.rock:i*self.rock + self.ro,i] = 0#以40为一个单元，其中10取0
+            self.X[i*self.rock + self.ro:(i + 1)*self.rock,i] = 1##以40为一个单元，其中30取1
+        self.ub = u_boundary(self.X).view(-1,1)
+class TESET():
+    def __init__(self):
+        self.size = 800
+        self.X = torch.rand(self.size,dim)
+        self.u_acc = u_accuracy(self.X).view(-1,1)
+
+class Res(nn.Module):
+    def __init__(self,input_size,output_size):
+        super(Res,self).__init__()
+        self.model = nn.Sequential(
+            nn.Linear(input_size,output_size),
+            nn.Sigmoid()
+        )
+        self.input = input_size
+        self.output = output_size
+    def forward(self,x):
+        x = self.model(x)
+        return x
+class NET(nn.Module):
+    def __init__(self):
+        super(NET,self).__init__()
+        self.model = nn.Sequential(
+            Res(dim,10),
+            Res(10,10),
+            Res(10,15),
+            Res(15,1)
+        )   
+       
+    def forward(self,x):
+        return self.model(x)
+   
+
+def pred(net,model):
+    mi = torch.zeros(1,dim).float()
+    ma = torch.ones(1,dim).float()
+    H = 0.5*(2*(model.X - mi)/(ma - mi) - 1)
+   # return net.forward(H)
+    return net.forward(model.X)
+def error(net,model):
+    fenzi = ((pred(net,model) - model.u_acc)**2).detach().numpy().sum()
+    fenmu = (model.u_acc**2 + 1e-7).detach().numpy().sum()
+    return np.sqrt(fenzi/fenmu)
+def loss(net,inset,bdset,beta):
+    inset.X.requires_grad = True
+    u_in = pred(net,inset)
+    ux, = torch.autograd.grad(u_in,inset.X,create_graph = True,retain_graph = True,
+                                  grad_outputs = torch.ones(inset.size,1))
+    ub = pred(net,bdset)
+    return 0.5*(ux**2).sum() - (inset.right*u_in).sum()\
+            + beta*((ub - bdset.ub)**2).sum()
+def train(net,inset,bdset,teset,beta,optim,epochs,step,record):
+    stime = time.time()
+    BUZHOU,ERROR = [],[]
+    for i in range(epochs):
+        print('train the neural network')
+        st = time.time()
+        for j in range(step):
+            optim.zero_grad()
+            LOSS = loss(net,inset,bdset,beta)
+            LOSS.backward()
+            optim.step()
+            if j%record == 0:
+                trainerror = error(net,inset)
+                teseterror = error(net,teset)
+                BUZHOU.append(i*step + j)
+                ERROR.append(teseterror)
+                print('epoch:%d,step:%d,loss:%.3e,train error:%.3f'%
+                     (i,j,LOSS.item(),trainerror))
+        alt = time.time() - st
+        print('one epoch use time:%.2f,teset error:%.3f'%(alt,teseterror))
+        print('----------------------------------------------------------')
+    traintime = time.time() - stime
+    print('train use time:%.2f'%(traintime))
+    return BUZHOU,ERROR
+net = NET()
+inset = INSET()
+bdset = BDSET()
+teset = TESET()
+optim = torch.optim.Adam(net.parameters(),lr = 5e-3)
+belta = 5e2
+epochs = 3
+step = 500
+record = 250
+
+BUZHOU,OLDERROR = train(net,inset,bdset,teset,belta,optim,epochs,step,record)
