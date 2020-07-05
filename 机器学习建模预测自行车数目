@@ -1,0 +1,18 @@
+import pandas as pd
+import numpy as np
+train = pd.read_csv('C:\\Users\\201611123\\Downloads\\hour.csv')#储存数据位置
+print(train.head())
+y = train['cnt']#最后一列cnt为自行车数目
+
+def f(x):
+    if x[:4] == '2011':
+        out = 0
+    else:
+        out = 1
+    return out
+x = train.drop('cnt',axis = 1)#删除最后一列
+x['dteday'] = x['dteday'].apply(f)#将年份时间转换为0，1
+from sklearn.linear_model import LinearRegression
+model = LinearRegression().fit(x,y)
+pred = model.predict(x)
+print(pred[:5])
