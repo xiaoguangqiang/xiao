@@ -1,0 +1,324 @@
+import torch
+import matplotlib.pyplot as plt
+import torch.nn as nn
+import time
+import numpy as np
+import torch.nn.functional as F
+
+def U(X, order,prob):
+    if prob==1:
+        temp = 10*(X[:,0]+X[:,1])**2 + (X[:,0]-X[:,1])**2 + 0.5
+        if order[0]==0 and order[1]==0:
+            return torch.log(temp)
+        if order[0]==1 and order[1]==0:
+            return temp**(-1) * (20*(X[:,0]+X[:,1]) + 2*(X[:,0]-X[:,1]))
+        if order[0]==0 and order[1]==1:
+            return temp**(-1) * (20*(X[:,0]+X[:,1]) - 2*(X[:,0]-X[:,1]))
+        if order[0]==2 and order[1]==0:
+            return - temp**(-2) * (20*(X[:,0]+X[:,1])+2*(X[:,0]-X[:,1])) ** 2 \
+                   + temp**(-1) * (22)
+        if order[0]==1 and order[1]==1:
+            return - temp**(-2) * (20*(X[:,0]+X[:,1])+2*(X[:,0]-X[:,1])) \
+                   * (20*(X[:,0]+X[:,1])-2*(X[:,0]-X[:,1])) \
+                   + temp**(-1) * (18)
+        if order[0]==0 and order[1]==2:
+            return - temp**(-2) * (20*(X[:,0]+X[:,1])-2*(X[:,0]-X[:,1])) ** 2 \
+                   + temp**(-1) * (22)
+
+    if prob==2:
+        if order[0]==0 and order[1]==0:
+            return (X[:,0]*X[:,0]*X[:,0]-X[:,0]) * \
+                   0.5*(torch.exp(2*X[:,1])+torch.exp(-2*X[:,1]))
+        if order[0]==1 and order[1]==0:
+            return (3*X[:,0]*X[:,0]-1) * \
+                   0.5*(torch.exp(2*X[:,1])+torch.exp(-2*X[:,1]))
+        if order[0]==0 and order[1]==1:
+            return (X[:,0]*X[:,0]*X[:,0]-X[:,0]) * \
+                   (torch.exp(2*X[:,1])-torch.exp(-2*X[:,1]))
+        if order[0]==2 and order[1]==0:
+            return (6*X[:,0]) * \
+                   0.5*(torch.exp(2*X[:,1])+torch.exp(-2*X[:,1]))
+        if order[0]==1 and order[1]==1:
+            return (3*X[:,0]*X[:,0]-1) * \
+                   (torch.exp(2*X[:,1])-torch.exp(-2*X[:,1]))
+        if order[0]==0 and order[1]==2:
+            return (X[:,0]*X[:,0]*X[:,0]-X[:,0]) * \
+                   2*(torch.exp(2*X[:,1])+torch.exp(-2*X[:,1]))
+
+    if prob==3:
+        temp1 = X[:,0]*X[:,0] - X[:,1]*X[:,1]
+        temp2 = X[:,0]*X[:,0] + X[:,1]*X[:,1] + 0.1
+        if order[0]==0 and order[1]==0:
+            return temp1 * temp2**(-1)
+        if order[0]==1 and order[1]==0:
+            return (2*X[:,0]) * temp2**(-1) + \
+                   temp1 * (-1)*temp2**(-2) * (2*X[:,0])
+        if order[0]==0 and order[1]==1:
+            return (-2*X[:,1]) * temp2**(-1) + \
+                   temp1 * (-1)*temp2**(-2) * (2*X[:,1])
+        if order[0]==2 and order[1]==0:
+            return (2) * temp2**(-1) + \
+                   2 * (2*X[:,0]) * (-1)*temp2**(-2) * (2*X[:,0]) + \
+                   temp1 * (2)*temp2**(-3) * (2*X[:,0])**2 + \
+                   temp1 * (-1)*temp2**(-2) * (2)
+        if order[0]==1 and order[1]==1:
+            return (2*X[:,0]) * (-1)*temp2**(-2) * (2*X[:,1]) + \
+                   (-2*X[:,1]) * (-1)*temp2**(-2) * (2*X[:,0]) + \
+                   temp1 * (2)*temp2**(-3) * (2*X[:,0]) * (2*X[:,1])
+        if order[0]==0 and order[1]==2:
+            return (-2) * temp2**(-1) + \
+                   2 * (-2*X[:,1]) * (-1)*temp2**(-2) * (2*X[:,1]) + \
+                   temp1 * (2)*temp2**(-3) * (2*X[:,1])**2 + \
+                   temp1 * (-1)*temp2**(-2) * (2)
+
+    if prob==4:
+        temp = torch.exp(-4*X[:,1]*X[:,1])
+        if order[0]==0 and order[1]==0:
+            ind = (X[:,0]<=0).float()
+            return ind * ((X[:,0]+1)**4-1) * temp + \
+                   (1-ind) * (-(-X[:,0]+1)**4+1) * temp
+        if order[0]==1 and order[1]==0:
+            ind = (X[:,0]<=0).float()
+            return ind * (4*(X[:,0]+1)**3) * temp + \
+                   (1-ind) * (4*(-X[:,0]+1)**3) * temp
+        if order[0]==0 and order[1]==1:
+            ind = (X[:,0]<=0).float()
+            return ind * ((X[:,0]+1)**4-1) * (temp*(-8*X[:,1])) + \
+                   (1-ind) * (-(-X[:,0]+1)**4+1) * (temp*(-8*X[:,1]))
+        if order[0]==2 and order[1]==0:
+            ind = (X[:,0]<=0).float()
+            return ind * (12*(X[:,0]+1)**2) * temp + \
+                   (1-ind) * (-12*(-X[:,0]+1)**2) * temp
+        if order[0]==1 and order[1]==1:
+            ind = (X[:,0]<=0).float()
+            return ind * (4*(X[:,0]+1)**3) * (temp*(-8*X[:,1])) + \
+                   (1-ind) * (4*(-X[:,0]+1)**3) * (temp*(-8*X[:,1]))
+        if order[0]==0 and order[1]==2:
+            ind = (X[:,0]<=0).float()
+            return ind * ((X[:,0]+1)**4-1) * (temp*(64*X[:,1]*X[:,1]-8)) + \
+                   (1-ind) * (-(-X[:,0]+1)**4+1) * (temp*(64*X[:,1]*X[:,1]-8))
+
+def A(X, order, ind):
+    if order==0:
+        if ind==[1,1]: return (X[:,0]+X[:,1])*(X[:,0]+X[:,1]) + 1 # a11
+        if ind==[1,2]: return -(X[:,0]+X[:,1])*(X[:,0]-X[:,1])    # a12
+        if ind==[2,1]: return -(X[:,0]+X[:,1])*(X[:,0]-X[:,1])    # a21
+        if ind==[2,2]: return (X[:,0]-X[:,1])*(X[:,0]-X[:,1]) + 1 # a22
+    if order==1:
+        if ind==[1,1]: return 2*(X[:,0]+X[:,1])  # a11_x
+        if ind==[1,2]: return -2*X[:,0]          # a12_x
+        if ind==[2,1]: return 2*X[:,1]           # a21_y
+        if ind==[2,2]: return -2*(X[:,0]-X[:,1]) # a22_y
+    
+def C(X, prob):
+    return A(X,1,[1,1])*U(X,[1,0],prob) + A(X,0,[1,1])*U(X,[2,0],prob) + \
+            A(X,1,[1,2])*U(X,[0,1],prob) + A(X,0,[1,2])*U(X,[1,1],prob) + \
+            A(X,1,[2,1])*U(X,[1,0],prob) + A(X,0,[2,1])*U(X,[1,1],prob) + \
+            A(X,1,[2,2])*U(X,[0,1],prob) + A(X,0,[2,2])*U(X,[0,2],prob)
+
+def NEU(X, n, prob):
+    return (A(X,0,[1,1])*U(X,[1,0],prob) + A(X,0,[1,2])*U(X,[0,1],prob)) * n[:,0] + \
+           (A(X,0,[2,1])*U(X,[1,0],prob) + A(X,0,[2,2])*U(X,[0,1],prob)) * n[:,1]
+#函数定义修改完成
+class INSET():
+    def __init__(self,bound,nx,prob):
+        self.dim = 2
+        self.area = (bound[0,1] - bound[0,0])*(bound[1,1] - bound[1,0])
+        self.hx = [(bound[0,1] - bound[0,0])/nx[0],(bound[1,1] - bound[1,0])/nx[1]]
+        self.size = nx[0]*nx[1]
+        self.X = torch.zeros(self.size,self.dim)#储存内点
+        for j in range(nx[1]):
+            for i in range(nx[0]):
+                self.X[j*nx[0] + i,0] = bound[0,0] + (i + 0.5)*self.hx[0]
+                self.X[j*nx[0] + i,1] = bound[1,0] + (j + 0.5)*self.hx[1]
+        self.u_acc = U(self.X,[0,0],prob).view(-1,1)#储存内点精确解
+        self.right = - C(self.X,prob).view(-1,1)# - nabla A \nabla u  = -c
+        self.AM = torch.zeros(self.size,2,2)#储存矩阵A在所有内点的取值，方便损失函数计算 (A \nabla u)* \nabal u
+        self.AM[:,0,0] = A(self.X,0,[1,1]);self.AM[:,0,1] = A(self.X,0,[1,2])
+        self.AM[:,1,0] = A(self.X,0,[2,1]);self.AM[:,1,1] = A(self.X,0,[2,2])
+
+class BDSET():
+    def __init__(self,bound,nx,prob):
+        self.dim = 2
+        self.hx = [(bound[0,1] - bound[0,0])/nx[0],(bound[1,1] - bound[1,0])/nx[1]]
+        self.DS = nx[1]#Dirichlet边界采样点数量
+        self.NS = 2*nx[0] + nx[1]#Neumann边界采样点数量
+        self.Dlenth = bound[1,1] - bound[1,0]
+        self.Nlenth = 2*(bound[0,1] - bound[0,0]) + bound[1,1] - bound[1,0]
+        self.DX = torch.zeros(self.DS,self.dim)#Dirichlet边界，{-1}*[-1,1]
+        self.NX = torch.zeros(self.NS,self.dim)#Neumann边界
+        self.Nn = torch.zeros(self.NS,self.dim)#Neumann边界中对应的3个外法向量
+        self.Dn = torch.zeros(self.DS,self.dim)
+        for i in range(nx[1]):
+            self.DX[i,0] = bound[0,0]
+            self.DX[i,1] = bound[1,0] + (i + 0.5)*self.hx[1]
+            self.Dn[i,0] = - 1;self.Dn[i,1] = 0
+        #下面采集Neumann边界点------------------------------------------
+        m = 0
+        for i in range(nx[0]):
+            self.NX[m,0] = bound[0,0] + (i + 0.5)*self.hx[0]
+            self.NX[m,1] = bound[1,0]
+            self.Nn[m,0] = 0
+            self.Nn[m,1] = -1
+            m = m + 1
+        for j in range(nx[1]):
+            self.NX[m,0] = bound[0,1]
+            self.NX[m,1] = bound[1,0] + (j + 0.5)*self.hx[1]
+            self.Nn[m,0] = 1
+            self.Nn[m,1] = 0
+            m = m + 1
+        for i in range(nx[0]):
+            self.NX[m,0] = bound[0,0] + (i + 0.5)*self.hx[0]
+            self.NX[m,1] = bound[1,1]
+            self.Nn[m,0] = 0
+            self.Nn[m,1] = 1
+            m = m + 1
+        self.Dright = U(self.DX,[0,0],prob).view(-1,1)#储存Dirichlet边界精确解取值
+        self.Nright = NEU(self.NX,self.Nn,prob).view(-1,1)#储存Neumann边界上条件
+        self.AM = torch.zeros(self.DS,2,2)#储存矩阵A在所有内点的取值，方便损失函数计算 (A \nabla u)* \nabal u
+        self.AM[:,0,0] = A(self.DX,0,[1,1]);self.AM[:,0,1] = A(self.DX,0,[1,2])
+        self.AM[:,1,0] = A(self.DX,0,[2,1]);self.AM[:,1,1] = A(self.DX,0,[2,2])
+class TESET():
+    def __init__(self,bound,nx,prob):
+        self.dim = 2
+        self.hx = [(bound[0,1] - bound[0,0])/nx[0],(bound[1,1] - bound[1,0])/nx[1]]
+        M,N = nx[0] + 1,nx[1] + 1
+        self.size = M*N
+        self.X = torch.zeros(self.size,self.dim)#储存求解区域所有网格点，包括边界点
+        for j in range(N):
+            for i in range(M):
+                self.X[j*M + i,0] = bound[0,0] + i*self.hx[0]
+                self.X[j*M + i,1] = bound[1,0] + j*self.hx[1]
+        self.u_acc = U(self.X,[0,0],prob).view(-1,1)#储存求解区域网格点对应精确解
+#数据集修改完成
+np.random.seed(1234)
+torch.manual_seed(1234)
+
+    
+class SIN(nn.Module):#u = netg*lenthfactor + netf，此为netg网络所用的激活函数
+    def __init__(self,order):
+        super(SIN,self).__init__()
+        self.e = order
+    def forward(self,x):
+        return torch.sin(x)**self.e
+class Res(nn.Module):
+    def __init__(self,input_size,output_size):
+        super(Res,self).__init__()
+        self.model = nn.Sequential(
+            nn.Linear(input_size,output_size),
+            SIN(2),
+            nn.Linear(output_size,output_size),
+            SIN(2)
+        )
+        self.input = input_size
+        self.output = output_size
+    def forward(self,x):
+        x = self.model(x) + x@torch.eye(x.size(1),self.output)#模拟残差网络
+        return x
+class NETF(nn.Module):#u = netg*lenthfactor + netf，此为netg，此netg逼近内部点取值
+    def __init__(self):
+        super(NETF,self).__init__()
+        self.model = nn.Sequential(
+            Res(2,10),
+            Res(10,10),
+            Res(10,10)
+        )
+        self.fc = torch.nn.Linear(10,1)
+    def forward(self,x):
+        out = self.model(x)
+        return self.fc(out)
+
+    
+def pred(netf,X):
+     return netf.forward(X)
+
+
+def error(u_pred, u_acc):
+    return (((u_pred-u_acc)**2).sum() / (u_acc**2).sum()) ** (0.5)
+
+# ----------------------------------------------------------------------------------------------------
+
+def Lossf(netf,inset,bdset,beta):#此为deep nitsche 算法损失函数
+    inset.X.requires_grad = True
+    u_in = pred(netf,inset.X)
+    ux_in, = torch.autograd.grad(u_in, inset.X,#计算长度因子关于内部点输入的梯度
+                                    create_graph=True, retain_graph=True,
+                                    grad_outputs=torch.ones(inset.size,1))
+    temp_in = (inset.AM@ux_in.view(-1,2,1)).view(-1,2)
+    out_in = 0.5*inset.area*((temp_in*ux_in).sum(1)).mean() - inset.area*(inset.right*u_in).mean()
+    #Dirichlet
+    bdset.DX.requires_grad = True
+    ub_D = pred(netf,bdset.DX)
+    ux_b, = torch.autograd.grad(ub_D, bdset.DX,#计算长度因子关于内部点输入的梯度
+                                    create_graph=True, retain_graph=True,
+                                    grad_outputs=torch.ones(bdset.DS,1))
+    temp_b = (bdset.AM@ux_b.view(-1,2,1)).view(-1,2)
+    n = bdset.Dn.view(-1,1,2)
+    uAu = (ub_D*temp_b).view(-1,2,1)
+    tem = temp_b.view(-1,2,1)
+    out_D = 0.5*beta*bdset.Dlenth*(ub_D**2).mean() - bdset.Dlenth*(n@uAu).mean()\
+    - bdset.Dlenth*(bdset.Dright*(beta*ub_D - (n@tem).view(-1,1))).mean()
+    #Neumann
+    ub_N = pred(netf,bdset.NX)
+    out_N = - bdset.Nlenth*(ub_N*bdset.Nright).mean()
+    return out_in + out_D + out_N
+# Train neural network f
+def Trainf(netf, inset, bdset, beta,optimf, epochf):
+    print('train neural network f')
+    ERROR,BUZHOU = [],[]
+    lossf = Lossf(netf,inset,bdset,beta)
+    lossoptimal = lossf
+    trainerror = error(netf.forward(inset.X),inset.u_acc)
+    print('epoch: %d, loss: %.3e, trainerror: %.3e'
+          %(0, lossf.item(), trainerror.item()))
+    torch.save(netf.state_dict(),'best_netf.mdl')
+    cycle = 100
+    for i in range(epochf):
+        st = time.time()
+        for j in range(cycle):
+            optimf.zero_grad()
+            lossf = Lossf(netf,inset,bdset,beta)
+            lossf.backward()
+            optimf.step()
+        if lossf < lossoptimal:
+            lossoptimal = lossf
+            torch.save(netf.state_dict(),'best_netf.mdl')
+        ela = time.time() - st
+        trainerror = error(netf.forward(inset.X),inset.u_acc)
+        ERROR.append(trainerror)
+        BUZHOU.append((i + 1)*cycle)
+        print('epoch:%d,lossf:%.3e,train error:%.3e,time:%.2f'%
+             ((i + 1)*cycle,lossf.item(),trainerror,ela))
+    return ERROR,BUZHOU
+def main():
+    bound = torch.Tensor([-1.0,1.0,-1.0,1.0]).reshape(2,2)
+    nx_tr = [50,60]#训练集剖分
+    nx_te = [100,100]
+    prob = 1
+    beta = 5e2
+    epochf = 30
+    lr = 1e-2
+    tests_num = 1
+    testerror = torch.zeros(tests_num)
+    for it in range(tests_num):
+        inset = INSET(bound, nx_tr, prob)
+        bdset = BDSET(bound, nx_tr, prob)
+        teset = TESET(bound, nx_te, prob)
+        netf = NETF()
+        optimf = torch.optim.Adam(netf.parameters(), lr=lr)
+        start_time = time.time()
+        Trainf(netf, inset, bdset, beta,optimf, epochf)
+        elapsed = time.time() - start_time
+        print('Train time: %.2f' %(elapsed))
+        netf.load_state_dict(torch.load('best_netf.mdl'))
+        te_U = pred(netf,teset.X)
+        testerror[it] = error(te_U, teset.u_acc)
+        print('testerror = %.3e\n' %(testerror[it].item()))
+    print(testerror.data)
+    testerror_mean = testerror.mean()
+    testerror_std = testerror.std()
+    print('testerror_mean = %.3e, testerror_std = %.3e'
+          %(testerror_mean.item(),testerror_std.item()))
+    
+if __name__ == '__main__':
+    main()
