@@ -1,0 +1,364 @@
+import torch
+import time
+import numpy as np
+import matplotlib.pyplot as plt
+import torch.nn as nn
+def U(X):
+    out = 0
+    for i in range(X.size(1) - 1):#100维
+        out += np.exp(-X[:,i]**2 - X[:,i + 1]**2)
+    out += np.exp(-X[:,-1]**2 - X[:,0]**2)
+    return out/X.size(1)
+def NablaU(X,local):#x.size(1) = 100
+    if local == 0:
+        return -2*X[:,0]*(np.exp(-X[:,0]**2 - X[:,1]**2) + np.exp(-X[:,-1]**2 - X[:,0]**2))/X.size(1)
+    elif local == X.size(1) - 1:#对最后一个坐标分量求偏导
+        return -2*X[:,-1]*(np.exp(-X[:,-2]**2 - X[:,-1]**2) + np.exp(-X[:,-1]**2 - X[:,0]**2))/X.size(1)
+    else:
+        return -2*X[:,local]*(np.exp(-X[:,local - 1]**2 - X[:,local]**2) + np.exp(-X[:,local]**2 - X[:,local + 1]**2))/X.size(1)
+def Uorder(X,local):#储存2阶导，即H矩阵的对角线元素
+    if local == 0:
+        return (4*X[:,0]**2 - 2)*(np.exp(-X[:,0]**2 - X[:,1]**2) + np.exp(-X[:,-1]**2 - X[:,0]**2))/X.size(1)
+    elif local == X.size(1) - 1:
+        return (4*X[:,-1]**2 - 2)*(np.exp(-X[:,-2]**2 - X[:,-1]**2) + np.exp(-X[:,-1]**2 - X[:,0]**2))/X.size(1)
+    else:
+        return (4*X[:,local]**2 - 2)*(np.exp(-X[:,local - 1]**2 - X[:,local]**2) + np.exp(-X[:,local]**2 - X[:,local + 1]**2))/X.size(1)
+def HU(X,lo,cal):#Hessen矩阵
+    if (lo == 0) and (cal == X.size(1) - 1):#对x_1,x_100求偏导
+        return 4*X[:,lo]*X[:,cal]*(np.exp(-X[:,lo]**2 - X[:,cal]**2))/X.size(1)
+    elif (lo == X.size(1) - 1) and (cal == 0):#对x_1,x_100求偏导
+        return 4*X[:,lo]*X[:,cal]*(np.exp(-X[:,lo]**2 - X[:,cal]**2))/X.size(1)
+    elif (lo - cal == 1) or (lo - cal == -1):
+        return 4*X[:,lo]*X[:,cal]*(np.exp(-X[:,lo]**2 - X[:,cal]**2))/X.size(1)
+    elif lo == cal:
+        return Uorder(X,lo)
+    else:
+        return 0*X[:,lo]
+    
+def C(X,p):
+    temp = 0
+    out = 0
+    for i in range(X.size(1)):#储存\nabla u的模长的平方
+        temp += NablaU(X,i)**2
+    tem = np.sqrt(temp)#储存\nabla u的模长
+    for i in range(X.size(1)):
+        out += Uorder(X,i)*tem**(p - 2) 
+    for i in range(X.size(1)):
+        for j in range(X.size(1)):
+            out += NablaU(X,i)*NablaU(X,j)*HU(X,i,j)*(p - 2)*tem**(p - 4)
+    return out - U(X)
+def R(X,p,alpha):
+    nablau = torch.zeros_like(X)
+    for i in range(X.size(1)):
+        nablau[:,i] = NablaU(X,i)
+    tem = ((nablau**2).sum(1))**(p - 2)
+    r = torch.zeros(X.size(0));nx = int(X.size(0)/X.size(1))
+    for i in range(X.size(1)):
+        r[i*nx:(i + 1)*nx] += tem[i*nx:(i + 1)*nx]*nablau[i*nx:(i + 1)*nx,i]
+    r[:] += alpha*U(X)
+    return r
+
+class INSET():
+    def __init__(self,bound,size,p):
+        self.size = size
+        self.bound = bound
+        self.dim = bound.shape[1]
+        self.p = p
+        self.vom = 1.0
+        for i in range(self.dim):
+            self.vom = self.vom*(bound[1,i] - bound[0,i])
+        self.X = bound[0,:] + (bound[1,:] - bound[0,:]) * \
+                 torch.rand(self.size,self.dim)
+        self.right = C(self.X,self.p).view(-1,1)
+        self.u_acc = U(self.X).view(-1,1)
+    def RESET(self):
+        self.X = self.bound[0,:] + (self.bound[1,:] - self.bound[0,:]) * \
+                 torch.rand(self.size,self.dim)
+        self.right = C(self.X,self.p).view(-1,1)
+        self.u_acc = U(self.X).view(-1,1)
+class BDSET():
+    def __init__(self,bound,size,p,alpha):
+        self.size = size
+        self.bound = bound
+        self.dim = bound.shape[1]
+        self.p = p
+        self.alpha = alpha
+        self.DS,self.RS = self.dim*self.size,self.dim*self.size
+        self.vom = 1.0
+        for i in range(self.dim):
+            self.vom = self.vom*(bound[1,i] - bound[0,i])
+        self.Rvom = 0.0
+        for i in range(self.dim):
+            self.Rvom = self.Rvom + self.vom/(bound[1,i] - bound[0,i])
+        self.DX = bound[0,:] + (bound[1,:] - bound[0,:]) * \
+                 torch.rand(self.DS,self.dim)
+        for i in range(self.dim):
+            self.DX[i*self.size:(i + 1)*self.size,i] = bound[0,i]
+        self.DU = U(self.DX).view(-1,1)
+        #------------------------------------------------
+        self.RX = bound[0,:] + (bound[1,:] - bound[0,:]) * \
+                 torch.rand(self.RS,self.dim)
+        for i in range(self.dim):
+            self.RX[i*self.size:(i + 1)*self.size,i] = bound[1,i]
+        self.RU = R(self.RX,self.p,self.alpha).view(-1,1)
+    def RESET(self):
+        self.DX = self.bound[0,:] + (self.bound[1,:] - self.bound[0,:])*torch.rand(self.DS,self.dim)
+        for i in range(self.dim):
+            self.DX[i*self.size:(i + 1)*self.size,i] = self.bound[0,i]
+        self.DU = U(self.DX).view(-1,1)
+        #------------------------------------------------
+        self.RX = self.bound[0,:] + (self.bound[1,:] - self.bound[0,:])*torch.rand(self.RS,self.dim)
+        for i in range(self.dim):
+            self.RX[i*self.size:(i + 1)*self.size,i] = self.bound[1,i]
+        self.RU = R(self.RX,self.p,self.alpha).view(-1,1)
+class TESET():
+    def __init__(self,bound,size,p):
+        self.size = size
+        self.dim = bound.shape[1]
+        self.p = p
+        self.X = bound[0,:] + (bound[1,:] - bound[0,:]) * \
+                 torch.rand(self.size,self.dim)
+        self.u_acc = U(self.X).view(-1,1)
+# ----------------------------------------------------------------------------------------------------
+# Penalty-Free Neural Network Method
+# ----------------------------------------------------------------------------------------------------
+
+
+# ----------------------------------------------------------------------------------------------------
+# Neural network
+np.random.seed(1234)
+torch.manual_seed(1234)
+class NETG(nn.Module):#u = netf*lenthfactor + netg，此为netg
+    def __init__(self,dim):
+        super(NETG,self).__init__()
+        self.fc1 = torch.nn.Linear(dim,10)
+        self.fc2 = torch.nn.Linear(10,10)
+        self.fc3 = torch.nn.Linear(10,1)
+    def forward(self,x):
+        out = torch.sin(self.fc1(x))
+        out = torch.sin(self.fc2(out)) + x@torch.eye(x.size(1),10)
+        return self.fc3(out)
+    
+class SIN(nn.Module):#u = netg*lenthfactor + netf，此为netg网络所用的激活函数
+    def __init__(self,order):
+        super(SIN,self).__init__()
+        self.e = order
+    def forward(self,x):
+        return torch.sin(x)**self.e
+class Res(nn.Module):
+    def __init__(self,input_size,output_size):
+        super(Res,self).__init__()
+        self.model = nn.Sequential(
+            nn.Linear(input_size,output_size),
+            SIN(1),
+            nn.Linear(output_size,output_size),
+            SIN(1)
+        )
+        self.input = input_size
+        self.output = output_size
+    def forward(self,x):
+        x = self.model(x) + x@torch.eye(x.size(1),self.output)#模拟残差网络
+        return x
+class NETF(nn.Module):#u = netg*lenthfactor + netf，此为netg，此netg逼近内部点取值
+    def __init__(self,dim):
+        super(NETF,self).__init__()
+        self.model = nn.Sequential(
+            Res(dim,12),
+            Res(12,12),
+            Res(12,12)
+        )
+        self.fc = torch.nn.Linear(12,1)
+    def forward(self,x):
+        out = self.model(x)
+        return self.fc(out)
+class lenthfactor():
+    def __init__(self,bound):
+        self.bound = bound
+        self.dim = bound.shape[1]
+        self.mu = self.dim
+        self.hx = bound[1,:] - bound[0,:]
+    def forward(self,X):
+        L = torch.ones(X.shape[0],1)
+        for i in range(self.dim):
+            temp = (X[:,i] - self.bound[0,i])/self.hx[i]
+            L[:,0] = L[:,0]*(1 - (1 - temp)**self.mu)
+        return L
+    def INL(self,inset):
+        inset.L = torch.ones(inset.size,1)
+        inset.Lx = torch.zeros(inset.size,inset.dim)
+        for i in range(self.dim):
+            temp = (inset.X[:,i]- self.bound[0,i])/self.hx[i]
+            inset.L[:,0] = inset.L[:,0] * (1.0 - (1.0 - temp)**self.mu)
+        for i in range(self.dim):
+            temp = (inset.X[:,i]- self.bound[0,i])/self.hx[i]
+            inset.Lx[:,i] = inset.L[:,0] / (1.0 - (1.0 - temp)**self.mu) * \
+                             (self.mu * (1.0 - temp)**(self.mu-1)) * (1/self.hx[i])
+    def BDL(self,bdset):
+        bdset.RL = torch.ones(bdset.RS,1)
+        for i in range(self.dim):
+            temp = (bdset.RX[:,i]- self.bound[0,i])/self.hx[i]
+            bdset.RL[:,0] = bdset.RL[:,0]*(1.0 - (1.0 - temp)**self.mu)
+        
+# Approximate solution
+def pred(netg,netf,lenth,X):
+    return netg.forward(X) + lenth.forward(X)*netf.forward(X)
+def error(u_pred, u_acc):
+    return (((u_pred-u_acc)**2).sum() / (u_acc**2).sum()) ** (0.5)
+# Loss function
+# ----------------------------------------------------------------------------------------------------
+# Loss function
+def Lossg(netg,bdset):#拟合Dirichlet边界
+    ub = netg.forward(bdset.DX)
+    return ((ub - bdset.DU)**2).mean()
+def Lossf(netf,inset,bdset):
+    inset.X.requires_grad = True
+    insetF = netf.forward(inset.X)
+    insetFx, = torch.autograd.grad(insetF, inset.X, create_graph=True, retain_graph=True,
+                                 grad_outputs=torch.ones(inset.size,1))
+    u_in = inset.G + inset.L * insetF#inset.G为netg在inset.X上取值，后面训练时提供，此举为加快迭代速度
+    ux_square = (inset.Gx + inset.Lx*insetF + inset.L*insetFx)**2
+    ub = bdset.RG + bdset.RL * netf.forward(bdset.RX)
+    return inset.p*inset.vom*(ux_square.sum(1)**(inset.p/2)).mean()\
+            + 0.5*inset.vom*(u_in**2).mean()\
+            + inset.vom*(inset.right*u_in).mean()\
+            + 0.5*bdset.alpha*bdset.Rvom*(ub**2).mean()\
+            - bdset.Rvom*(bdset.RU*ub).mean()
+
+
+# ----------------------------------------------------------------------------------------------------
+# Train neural network g
+def Traing(netg, bdset, optimg, epochg):
+    print('train neural network g')
+    lossg = Lossg(netg,bdset)
+    lossbest = lossg
+    print('epoch:%d,lossf:%.3e'%(0,lossg.item()))
+    torch.save(netg.state_dict(),'best_netg.pkl')
+    cycle = 100
+    for i in range(epochg):
+        st = time.time()
+        bdset.RESET()
+        for j in range(cycle):
+            optimg.zero_grad()
+            lossg = Lossg(netg,bdset)
+            lossg.backward()
+            optimg.step()
+        if lossg < lossbest:
+            lossbest = lossg
+            torch.save(netg.state_dict(),'best_netg.pkl')
+        ela = time.time() - st
+        print('epoch:%d,lossg:%.3e,time:%.2f'%((i + 1)*cycle,lossg.item(),ela))
+# Train neural network f
+# Train neural network f
+def Trainf(netg,netf,lenth,inset, bdset, optimf, epochf):
+    print('train neural network f')
+    inset.RESET();lenth.INL(inset)
+    bdset.RESET();lenth.BDL(bdset)
+    inset.X.requires_grad = True
+    inset.G = netg.forward(inset.X)
+    inset.Gx, = torch.autograd.grad(inset.G, inset.X,#计算长度因子关于内部点输入的梯度
+                                    create_graph=True, retain_graph=True,
+                                    grad_outputs=torch.ones(inset.size,1))
+    bdset.RG = netg.forward(bdset.RX)
+    inset.G = inset.G.data;inset.Gx = inset.Gx.data;bdset.RG = bdset.RG.data
+    ERROR,BUZHOU = [],[]
+    lossf = Lossf(netf,inset,bdset)
+    lossoptimal = lossf
+    trainerror = error(inset.G + inset.L * netf.forward(inset.X), inset.u_acc)
+    print('epoch: %d, loss: %.3e, trainerror: %.3e'
+          %(0, lossf.item(), trainerror.item()))
+    torch.save(netf.state_dict(),'best_netf.pkl')
+    cycle = 100
+    for i in range(epochf):
+        st = time.time()
+        inset.RESET();lenth.INL(inset)
+        bdset.RESET();lenth.BDL(bdset)
+        inset.X.requires_grad = True
+        inset.G = netg.forward(inset.X)
+        inset.Gx, = torch.autograd.grad(inset.G, inset.X,#计算长度因子关于内部点输入的梯度
+                                        create_graph=True, retain_graph=True,
+                                        grad_outputs=torch.ones(inset.size,1))
+        bdset.RG = netg.forward(bdset.RX)
+        inset.G = inset.G.data;inset.Gx = inset.Gx.data;bdset.RG = bdset.RG.data
+        for j in range(cycle):
+            optimf.zero_grad()
+            lossf = Lossf(netf,inset,bdset)
+            lossf.backward()
+            optimf.step()
+        if lossf < lossoptimal:
+            lossoptimal = lossf
+            torch.save(netf.state_dict(),'best_netf.pkl')
+        ela = time.time() - st
+        trainerror = error(inset.G + inset.L * netf.forward(inset.X), inset.u_acc)
+        ERROR.append(trainerror.item())
+        BUZHOU.append((i + 1)*cycle)
+        print('epoch:%d,lossf:%.3e,train error:%.3e,time:%.2f'%
+             ((i + 1)*cycle,lossf.item(),trainerror,ela))
+    return ERROR,BUZHOU
+# Train neural network
+def Train(netg, netf, lenth, inset, bdset, optimg, optimf, epochg, epochf):
+    # Train neural network g
+    Traing(netg, bdset, optimg, epochg)
+
+    netg.load_state_dict(torch.load('best_netg.pkl'))
+    # Train neural network f
+    ERROR,BUZHOU = Trainf(netg,netf,lenth,inset, bdset, optimf, epochf)
+    return ERROR,BUZHOU
+# ----------------------------------------------------------------------------------------------------
+
+def main():
+
+    dim = 20
+    pp = 4.8
+    alpha = 2.0
+    in_size = 1000
+    bd_size = 50
+    te_size = 5000
+    epochg = 10
+    epochf = 10
+    learning_rate = 0.01
+    tests_num = 1
+
+    # Bounds
+    bound = torch.zeros(2,dim)
+    bound[1,:] = 1.0
+    
+    # ------------------------------------------------------------------------------------------------
+    # Tests
+    te_REN = torch.zeros(tests_num)
+    for it in range(tests_num):
+
+        # Parepare data set
+        inset = INSET(bound, in_size, pp)
+        bdset = BDSET(bound, bd_size, pp, alpha)
+        teset = TESET(bound, te_size,pp)
+
+        # Construct length factor
+        lenth = lenthfactor(bound)
+
+        # Construct neural network
+        netg = NETG(dim)
+        netf = NETF(dim)
+        optimg = torch.optim.Adam(netg.parameters(), lr=learning_rate)
+        optimf = torch.optim.Adam(netf.parameters(), lr=learning_rate)
+
+        # Train neural network
+        start_time = time.time()
+        Train(netg, netf, lenth, inset, bdset, optimg, optimf, epochg, epochf)
+        elapsed = time.time() - start_time
+        print('Train time: %.2f' %(elapsed))
+
+        # Make prediction
+        #netg.load_state_dict(torch.load('best_netf.pkl'))
+        #netf.load_state_dict(torch.load('best_netg.pkl'))
+        te_U = pred(netg,netf,lenth,teset.X)
+        te_REN[it] = error(te_U,teset.u_acc)
+        print('te_REN = %.3e\n' %(te_REN[it].item()))
+    
+    # ------------------------------------------------------------------------------------------------
+    print(te_REN.data)
+    te_REN_mean = te_REN.mean()
+    te_REN_std = te_REN.std()
+    print('Te_REN_mean = %.3e, Te_REN_std = %.3e' %(te_REN_mean.item(),te_REN_std.item()))
+    
+if __name__ == '__main__':
+    main()
