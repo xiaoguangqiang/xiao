@@ -1,0 +1,382 @@
+import torch
+import time
+import numpy as np
+import matplotlib.pyplot as plt
+import torch.nn as nn
+
+# ----------------------------------------------------------------------------------------------------
+# Generate Data
+
+# Solution
+def UU(X, lamda, order):
+    temp = lamda * 0.5*(torch.exp(X[:,0]/lamda)+torch.exp(-X[:,0]/lamda))
+    if order[0]==0 and order[1]==0:
+        return temp * torch.sin(torch.acos(X[:,1]/temp))
+    if order[0]==1 and order[1]==0:
+        temp_x = 0.5*(torch.exp(X[:,0]/lamda)-torch.exp(-X[:,0]/lamda));
+        return temp_x * torch.sin(torch.acos(X[:,1]/temp)) + \
+               temp * torch.cos(torch.acos(X[:,1]/temp)) * \
+               (-(1-(X[:,1]/temp)**2)**(-0.5)) * \
+               (-X[:,1]/temp**2) * temp_x
+    if order[0]==0 and order[1]==1:
+        return temp * torch.cos(torch.acos(X[:,1]/temp)) * \
+               (-(1-(X[:,1]/temp)**2)**(-0.5)) * (1/temp)
+
+# Right hand side of the Neumann boundary 
+def RR_N(X, n, lamda):
+    u_x1 = UU(X,lamda,[1,0]); u_x2 = UU(X,lamda,[0,1])
+    return 1/(1+u_x1*u_x1+u_x2*u_x2)**0.5 * (u_x1*n[:,0]+u_x2*n[:,1])
+
+# ----------------------------------------------------------------------------------------------------
+# Inner Set
+class INSET():
+    def __init__(self, radius, nx, lamda):
+        self.dim = 2
+        self.radius = radius
+        self.nx = nx
+        self.hx = self.radius/3**0.5/self.nx
+        self.area = 6 * self.radius/3**0.5 * self.radius/2
+
+        self.size = 6 * 2*self.nx**2
+        self.X = torch.zeros(self.size,self.dim)
+        m = 0
+        for i in range(self.nx):
+            for j in range(self.nx):
+                self.X[2*m,0] = (0.5+i+0.5*j) * self.hx
+                self.X[2*m,1] = (j+1/3) * 0.5*3**0.5*self.hx
+                self.X[2*m+1,0] = (1+i+0.5*j) * self.hx
+                self.X[2*m+1,1] = (j+2/3) * 0.5*3**0.5*self.hx
+                m = m+1
+
+        th = np.pi/3
+        RM = torch.Tensor([np.cos(th),np.sin(th),-np.sin(th),np.cos(th)]).reshape(2,2)
+        for k in range(5):
+            ind0 = k*2*self.nx**2; ind1 = (k+1)*2*self.nx**2; ind2 = (k+2)*2*self.nx**2
+            self.X[ind1:ind2,:] = self.X[ind0:ind1,:].matmul(RM)
+
+        self.u_acc = UU(self.X,lamda,[0,0]).reshape(self.size,1)
+        
+# Boundary set
+class BDSET():
+    def __init__(self, radius, nx, lamda):
+        self.dim = 2
+        self.radius = radius
+        self.nx = nx
+        self.hx = self.radius/3**0.5/self.nx
+        self.lenth = 12*self.nx*self.hx
+
+        self.size = 12*self.nx
+        self.X = torch.zeros(self.size,self.dim)
+        self.n = torch.zeros(self.size,self.dim)
+        m = 0
+        for i in range(self.nx):
+            self.X[m,0] = -(i+0.5) * 0.5*self.hx
+            self.X[m,1] = self.radius - (i+0.5) * 0.5*3**0.5*self.hx
+            self.n[m,0] = -0.5*3**0.5
+            self.n[m,1] = 0.5
+            m = m+1
+        for i in range(self.nx):
+            self.X[m,0] = -0.5*self.radius/3**0.5 - (i+0.5) * self.hx
+            self.X[m,1] = 0.5*self.radius
+            self.n[m,0] = 0.0
+            self.n[m,1] = 1.0
+            m = m+1
+
+        th = np.pi/3
+        RM = torch.Tensor([np.cos(th),np.sin(th),-np.sin(th),np.cos(th)]).reshape(2,2)
+        for k in range(5):
+            ind0 = k*2*self.nx; ind1 = (k+1)*2*self.nx; ind2 = (k+2)*2*self.nx
+            self.X[ind1:ind2,:] = self.X[ind0:ind1,:].matmul(RM)
+            self.n[ind1:ind2,:] = self.n[ind0:ind1,:].matmul(RM)
+        
+        self.DS = 6*nx
+        self.Dlenth = self.DS*self.hx
+        self.DX = self.X[:self.DS,:]
+        self.Dn = self.n[:self.DS,:]
+
+        self.NS = self.size - self.DS
+        self.Nlenth = self.NS*self.hx
+        self.NX = self.X[self.DS:,:]
+        self.Nn = self.n[self.DS:,:]
+
+        self.Dright = UU(self.DX,lamda,[0,0]).reshape(-1,1)
+        self.Nright = RR_N(self.NX,self.Nn,lamda).reshape(-1,1)
+
+
+# Test set
+class TESET():
+    def __init__(self, radius, nx, lamda):
+        self.dim = 2
+        self.radius = radius
+        self.nx = nx
+        self.hx = self.radius/3**0.5/self.nx
+
+        self.size = 6 * self.nx*(self.nx+1) + 1
+        self.X = torch.zeros(self.size,self.dim)
+        m = 0
+        for i in range(self.nx):
+            for j in range(self.nx+1):
+                self.X[m,0] = (1+i+0.5*j) * self.hx
+                self.X[m,1] = j * 0.5*3**0.5*self.hx
+                m = m+1
+
+        th = np.pi/3
+        RM = torch.Tensor([np.cos(th),np.sin(th),-np.sin(th),np.cos(th)]).reshape(2,2)
+        for k in range(5):
+            ind0 = k*self.nx*(self.nx+1)
+            ind1 = (k+1)*self.nx*(self.nx+1)
+            ind2 = (k+2)*self.nx*(self.nx+1)
+            self.X[ind1:ind2,:] = self.X[ind0:ind1,:].matmul(RM)
+
+        self.u_acc = UU(self.X,lamda,[0,0]).reshape(-1,1)
+class LEN():
+    def __init__(self,bdset):
+        self.n = bdset.nx
+        self.radius = bdset.radius
+        self.dim = 2
+        self.mu = 3
+        self.num = 3
+        self.ee = 1#(1.25*self.radius)**2/(4*self.n)
+        self.inp = []
+        self.L_max = 1.0
+        for i in range(self.num):
+            node = torch.zeros(4*self.n,self.dim)
+            node[0:2*self.n,:] = bdset.DX[2*i*self.n:2*(i + 1)*self.n,:]
+            node[2*self.n:,:] = bdset.NX[2*i*self.n:2*(i + 1)*self.n,:]
+            self.inp.append(node)
+        self.L_max = max(self.forward(bdset.X))
+    def dist(self,X,Y):
+        d = ((X - Y)**2).sum(1)
+        return (self.ee + d)**(-0.5)
+    def coef(self,k):
+        node = self.inp[k]#[60,2]
+        size = node.shape[0] + node.shape[1] + 1
+        N = node.shape[0]
+        A = torch.zeros(size,size)
+        A[:N,N:size - 1] = node
+        A[N:size - 1,:N] = node.t()
+        A[:N,-1] = torch.ones(N)
+        A[-1,:N] = torch.ones(N)
+        for i in range(N):
+            A[0:N,i] = self.dist(node,node[i,:])
+       #print(A[0:N,0].shape,self.dist(node,node[0,:]).shape)
+        b = torch.zeros(size,1)
+        b[2*self.n:4*self.n,:] = torch.ones(2*self.n,1)
+        xishu,unknow = torch.solve(b,A)
+        return xishu
+    def lk(self,k,X):
+        node = self.inp[k]#[60,2]
+        size = node.shape[0] + node.shape[1] + 1
+        N = node.shape[0]
+        value = torch.zeros(X.shape[0])
+        xishu = self.coef(k)
+        for i in range(N):
+            value += xishu[i]*self.dist(X,node[i,:])
+        for j in range(node.shape[1]):
+            value += xishu[N + j]*X[:,j]
+        return value + xishu[-1]
+    def forward(self,X):
+        L = 1.0
+        for i in range(self.num):
+            L = L*(1 - (1 - self.lk(i,X))**self.mu)
+        return (L/self.L_max).view(-1,1)
+'''                 
+nx = 4
+lamda = 2.1
+radius = 2
+bdset = BDSET(radius, nx, lamda)
+le = LEN(bdset)
+i = 0
+node = torch.zeros(4*nx,2)
+node[0:2*nx,:] = bdset.DX[2*i*nx:2*(i + 1)*nx,:]
+node[2*nx:,:] = bdset.NX[2*i*nx:2*(i + 1)*nx,:]
+dx = bdset.DX[2*i*nx:2*(i + 1)*nx,:]
+print(le.lk(i,node))
+#测试长度因子函数
+'''
+np.random.seed(1234)
+torch.manual_seed(1234)    
+class Net(torch.nn.Module):
+    def __init__(self, layers):
+        super(Net, self).__init__()
+        self.layers = layers
+        self.hidden_layers_num = len(layers)-2
+
+        fc = []
+        for i in range(self.hidden_layers_num):
+            fc.append(torch.nn.Linear(self.layers[i],self.layers[i+1]))
+            fc.append(torch.nn.Linear(self.layers[i+1],self.layers[i+1]))
+        fc.append(torch.nn.Linear(self.layers[-2], self.layers[-1]))
+        self.fc = torch.nn.Sequential(*fc)
+
+    def forward(self, Input):
+        for i in range(self.hidden_layers_num):
+            Output = torch.sin(self.fc[2*i](Input))
+            Output = torch.sin(self.fc[2*i+1](Output))
+            Output[:,0:self.layers[i]] = Output[:,0:self.layers[i]] + Input
+            Input = Output
+        return self.fc[-1](Input)
+
+def pred(netg,netf,lenth,X):
+    return netg.forward(X) + lenth.forward(X)*netf.forward(X)
+def error(u_pred, u_acc):
+    fenzi = ((u_pred - u_acc)**2).sum()
+    fenmu = (u_acc**2).sum()
+    return (fenzi/fenmu)**(0.5)
+
+def Lossg(netg,bdset):#拟合Dirichlet边界
+    ub = netg.forward(bdset.DX)
+    return bdset.Dlenth * ((ub - bdset.Dright)**2).mean()
+
+def Lossf(netf,inset,bdset):
+    inset.X.requires_grad = True
+    insetF = netf.forward(inset.X)
+    insetFx, = torch.autograd.grad(insetF, inset.X, create_graph=True, retain_graph=True,
+                                 grad_outputs=torch.ones(inset.size,1))
+    u_in = inset.G + inset.L * insetF#inset.G为netg在inset.X上取值，后面训练时提供，此举为加快迭代速度
+    ux = inset.Gx + inset.Lx*insetF + inset.L*insetFx#复合函数求导，提高迭代效率
+
+    ub = bdset.N_G + bdset.N_L * netf.forward(bdset.NX)
+
+    return (inset.area*((1 + ux**2).sum(1))**0.5).mean()\
+           - bdset.Nlenth * (bdset.Nright*ub).mean()
+
+def Traing(netg, bdset, optimg, epochg):
+    print('train neural network g')
+    lossg = Lossg(netg,bdset)
+    lossbest = lossg
+    print('epoch:%d,lossf:%.3e'%(0,lossg.item()))
+    torch.save(netg.state_dict(),'best_netg.pkl')
+    cycle = 100
+    for i in range(epochg):
+        st = time.time()
+        for j in range(cycle):
+            optimg.zero_grad()
+            lossg = Lossg(netg,bdset)
+            lossg.backward()
+            optimg.step()
+        if lossg < lossbest:
+            lossbest = lossg
+            torch.save(netg.state_dict(),'best_netg.pkl')
+        ela = time.time() - st
+        print('epoch:%d,lossg:%.3e,time:%.2f'%((i + 1)*cycle,lossg.item(),ela))
+
+# Train neural network f
+def Trainf(netf, inset, bdset, optimf, epochf):
+    print('train neural network f')
+    ERROR,BUZHOU = [],[]
+    lossf = Lossf(netf,inset,bdset)
+    lossoptimal = lossf
+    
+    trainerror = error(inset.G + inset.L * netf.forward(inset.X), inset.u_acc)
+    
+    print('epoch: %d, loss: %.3e, trainerror: %.3e'
+          %(0, lossf.item(), trainerror.item()))
+    torch.save(netf.state_dict(),'best_netf.pkl')
+    cycle = 100
+    for i in range(epochf):
+        st = time.time()
+        for j in range(cycle):
+            optimf.zero_grad()
+            lossf = Lossf(netf,inset,bdset)
+            lossf.backward()
+            optimf.step()
+        if lossf < lossoptimal:
+            lossoptimal = lossf
+            torch.save(netf.state_dict(),'best_netf.pkl')
+        ela = time.time() - st
+        trainerror = error(inset.G + inset.L * netf.forward(inset.X), inset.u_acc)
+       
+        ERROR.append(trainerror.item())
+        BUZHOU.append((i + 1)*cycle)
+        print('epoch:%d,lossf:%.3e,train error:%.3e,time:%.2f'%
+             ((i + 1)*cycle,lossf.item(),trainerror,ela))
+    
+    return ERROR,BUZHOU
+
+# Train neural network
+def Train(netg, netf, lenth, inset, bdset, optimg, optimf, epochg, epochf):
+    
+    # Calculate the length factor
+    inset.X.requires_grad = True
+    inset.L = lenth.forward(inset.X)
+    inset.Lx, = torch.autograd.grad(inset.L, inset.X,#计算长度因子关于内部点输入的梯度
+                                    create_graph=True, retain_graph=True,
+                                    grad_outputs=torch.ones(inset.size,1))
+    bdset.N_L = lenth.forward(bdset.NX)#计算长度因子关于Neumann边界样本点的梯度
+
+    inset.L = inset.L.data; inset.Lx = inset.Lx.data; bdset.N_L = bdset.N_L.data
+
+    # Train neural network g
+    Traing(netg, bdset, optimg, epochg)
+
+    netg.load_state_dict(torch.load('best_netg.pkl'))
+    inset.X.requires_grad = True
+    inset.G = netg.forward(inset.X)
+    inset.Gx, = torch.autograd.grad(inset.G, inset.X,
+                                    create_graph=True, retain_graph=True,
+                                    grad_outputs=torch.ones(inset.size,1))
+    bdset.N_G = netg.forward(bdset.NX)
+
+    inset.G = inset.G.data; inset.Gx = inset.Gx.data; bdset.N_G = bdset.N_G.data
+
+    # Train neural network f
+    ERROR,BUZHOU = Trainf(netf, inset, bdset, optimf, epochf)
+    return ERROR,BUZHOU
+def main():
+    
+    # Configurations
+    radius = 2.0
+    lamda = 2.1
+    nx_tr = 15
+    nx_te = 30
+    
+    epochg = 4
+    epochf = 4
+    layer_g = [2,10,1]
+    layer_f = [2,10,10,10,1]
+    learning_rate = 0.01
+    tests_num = 1
+
+    # ------------------------------------------------------------------------------------------------
+    # Tests
+    testerror = torch.zeros(tests_num)
+    for it in range(tests_num):
+
+        # Parepare data set
+        inset = INSET(radius, nx_tr, lamda)
+        bdset = BDSET(radius, nx_tr, lamda)
+        teset = TESET(radius, nx_te, lamda)
+        
+        # Construct length factor
+        #lenth = lenthfactor(bdset)
+        lenth = LEN(bdset)
+        # Construct neural network
+        netg = Net(layer_f)
+        netf = Net(layer_g)
+        optimg = torch.optim.Adam(netg.parameters(), lr=learning_rate)
+        optimf = torch.optim.Adam(netf.parameters(), lr=learning_rate)
+
+        # Train neural network
+        start_time = time.time()
+        ERROR,BUZHOU = Train(netg, netf, lenth, inset, bdset, optimg, optimf, epochg, epochf)
+        print(ERROR,BUZHOU)
+        elapsed = time.time() - start_time
+        print('Train time: %.2f' %(elapsed))
+        
+        # Make prediction
+        netg.load_state_dict(torch.load('best_netg.pkl'))
+        netf.load_state_dict(torch.load('best_netf.pkl'))
+        te_U = pred(netg, netf, lenth, teset.X)
+        testerror[it] = error(te_U, teset.u_acc)
+        print('testerror = %.3e\n' %(testerror[it].item()))
+
+    # ------------------------------------------------------------------------------------------------
+    print(testerror.data)
+    errors_mean = testerror.mean()
+    errors_std = testerror.std()
+    print('test_error_mean = %.3e, test_error_std = %.3e'
+          %(errors_mean.item(),errors_std.item()))
+    
+if __name__ == '__main__':
+    main()
