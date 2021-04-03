@@ -84,7 +84,7 @@ class NN:
         self.max = tf.compat.v1.placeholder(tf.float32,shape = [None,2])#准备数据集两个轴的上线限
         self.feed = {self.inset_x_tf:inset.X,self.bdset_x_tf:bdset.X,
                      self.right_tf:inset.right,self.ub_tf:bdset.u_acc,
-                     self.min:datamin,self.max:datamax}#准备喂数据集
+                     self.min:self.datamin,self.max:self.datamax}#准备喂数据集
         self.Hin = 2*(self.inset_x_tf - self.min)/(self.max - self.min) - 1#正规化处理
         self.Hbd = 2*(self.bdset_x_tf - self.min)/(self.max - self.min) - 1#正规化处理
         self.weights,self.biases = self.NNinit()#通过函数NNinit完成权重，偏置初始化
@@ -184,7 +184,7 @@ class NN:
             y = x + batch
             feed = {self.inset_x_tf:inset.X[x:y],self.bdset_x_tf:bdset.X,
                     self.right_tf:inset.right[x:y],self.ub_tf:bdset.u_acc,
-                    self.min:datamin,self.max:datamax}
+                    self.min:self.datamin,self.max:self.datamax}
             self.sess.run(self.minimizer,feed_dict = feed)
             if j%record == 0:
                 error = self.sess.run(self.ERROR(),feed_dict = self.feed)
@@ -213,13 +213,13 @@ epochs = 3
 st = time.time()
 for i in range(epochs):#开始训练
     print('epochs:%d'%(i))
-    #ne.trainbatch(500)
-    ne.train(2000)
+    ne.trainbatch(500)
+    #ne.train(2000)
 ed = time.time()
 print('all used time:%.2f'%(ed - st))
 
 #预测函数近似值和误差
-feed = {ne.inset_x_tf:teset.X,ne.min:datamin,ne.max:datamax}
+feed = {ne.inset_x_tf:teset.X,ne.min:ne.datamin,ne.max:ne.datamax}
 u_pred = ne.sess.run(ne.u_in,feed_dict = feed)#利用类NN中的u_in来计算测试集上的近似值
 u_acc = np.array(teset.u_acc,dtype = np.float32)#拿出测试集中精确解
 def LERROR(u_pred,u_acc):
@@ -238,6 +238,3 @@ y_train = np.linspace(teset.ya,teset.yb,N)
 x,y = np.meshgrid(x_train,y_train)
 plt.contourf(x,y,u_pred.reshape(M,N).T,40,cmap = 'Blues')#画出图像
 plt.colorbar()
-plt.xlabel('x')
-plt.ylabel('y')
-plt.title('numerical solution')
