@@ -1,0 +1,464 @@
+import torch
+import time
+import numpy as np
+import matplotlib.pyplot as plt
+from matplotlib import cm
+import torch.nn as nn
+from scipy.stats import qmc
+import itertools
+import bfgs
+
+device = torch.device("cuda:0" if torch.cuda.is_available() else "cpu")
+#device = torch.device('cpu')
+np.random.seed(1234)
+torch.manual_seed(1234)
+
+alpha = 1e-2
+ua = 0
+ub = 3
+bound = torch.tensor([0,1,0,1]).reshape(2,2)
+def YY(x):
+    x1 = x[:,0:1]
+    x2 = x[:,1:2]
+    return torch.sin(np.pi*x1)*torch.sin(np.pi*x2)
+def PP(x):
+    return -2*alpha*YY(x)*np.pi**2
+
+def Yd(x):
+    return (1 + 4*alpha*np.pi**4)*YY(x) - 3*PP(x)*YY(x)**2
+def Proj(x):
+    return torch.min(torch.max(x,ua+0*x),ub+0*x)
+def UU(x):
+    return Proj(YY(x)*2*np.pi**2)
+def FF(x):
+    return 2*YY(x)*np.pi**2 + YY(x)**3 - UU(x)
+
+class INSET():#边界点取值
+    def __init__(self,bound,nx,mode):
+        self.dim = 2
+        #self.area = (bound[0,1] - bound[0,0])*(bound[1,1] - bound[1,0])
+        self.hx = [(bound[0,1] - bound[0,0])/nx[0],(bound[1,1] - bound[1,0])/nx[1]]
+        self.size = nx[0]*nx[1]
+        self.X = torch.zeros(self.size,self.dim)#储存内点
+        if mode == 'uniform':
+            for i in range(nx[0]):
+                for j in range(nx[1]):
+                    self.X[i*nx[1] + j,0] = bound[0,0] + (i + 0.5)*self.hx[0]
+                    self.X[i*nx[1] + j,1] = bound[1,0] + (j + 0.5)*self.hx[1]
+        elif mode == 'random':
+            tmp = torch.rand(self.size,2)
+            self.X[:,0] = bound[0,0] + self.hx[0] + (bound[0,1] - bound[0,0] - 2*self.hx[0])*tmp[:,0]
+            self.X[:,1] = bound[1,0] + self.hx[1] + (bound[1,1] - bound[1,0] - 2*self.hx[1])*tmp[:,1]
+        else:
+            tmp = torch.tensor(self.quasi_samples(self.size))
+            self.X[:,0] = bound[0,0] + self.hx[0] + (bound[0,1] - bound[0,0] - 2*self.hx[0])*tmp[:,0]
+            self.X[:,1] = bound[1,0] + self.hx[1] + (bound[1,1] - bound[1,0] - 2*self.hx[1])*tmp[:,1]
+        self.y_acc = YY(self.X).reshape(-1,1)
+        self.u_acc = UU(self.X).reshape(-1,1)
+        self.ff = FF(self.X).reshape(-1,1)
+        self.yd = Yd(self.X).reshape(-1,1)
+        self.area = (bound[0,1] - bound[0,0])*(bound[1,1] - bound[1,0])
+    def quasi_samples(self,N):
+        sampler = qmc.Sobol(d=self.dim)
+        sample = sampler.random(n=N)
+        return sample
+        
+
+class TESET():
+    def __init__(self, bound, nx):
+        self.bound = bound
+        self.nx = [nx[0] + 1,nx[1] + 1]
+        self.hx = [(self.bound[0,1]-self.bound[0,0])/self.nx[0],
+                   (self.bound[1,1]-self.bound[1,0])/self.nx[1]]
+        
+        self.size = self.nx[0]*self.nx[1]
+        self.X = torch.zeros(self.size,2)
+        m = 0
+        for i in range(self.nx[0]):
+            for j in range(self.nx[1]):
+                self.X[m,0] = self.bound[0,0] + i*self.hx[0]
+                self.X[m,1] = self.bound[1,0] + j*self.hx[1]
+                m = m + 1
+        self.y_acc = YY(self.X).reshape(-1,1)
+        self.u_acc = UU(self.X).reshape(-1,1)
+        self.ff = FF(self.X).reshape(-1,1)
+        self.yd = Yd(self.X).reshape(-1,1)
+        self.area = (bound[0,1] - bound[0,0])*(bound[1,1] - bound[1,0])
+#数据集修改完成
+
+class Net(torch.nn.Module):
+    def __init__(self, layers, dtype):
+        super(Net, self).__init__()
+        self.layers = layers
+        self.layers_hid_num = len(layers)-2
+        self.device = device
+        self.dtype = dtype
+        fc = []
+        for i in range(self.layers_hid_num):
+            fc.append(torch.nn.Linear(self.layers[i],self.layers[i+1]))
+            fc.append(torch.nn.Linear(self.layers[i+1],self.layers[i+1]))
+        fc.append(torch.nn.Linear(self.layers[-2],self.layers[-1]))
+        self.fc = torch.nn.Sequential(*fc)
+        for i in range(self.layers_hid_num):
+            self.fc[2*i].weight.data = self.fc[2*i].weight.data.type(dtype)
+            self.fc[2*i].bias.data = self.fc[2*i].bias.data.type(dtype)
+            self.fc[2*i + 1].weight.data = self.fc[2*i + 1].weight.data.type(dtype)
+            self.fc[2*i + 1].bias.data = self.fc[2*i + 1].bias.data.type(dtype)
+        self.fc[-1].weight.data = self.fc[-1].weight.data.type(dtype)
+        self.fc[-1].bias.data = self.fc[-1].bias.data.type(dtype)
+    def forward(self, x):
+        dev = x.device
+        for i in range(self.layers_hid_num):
+            h = torch.sin(self.fc[2*i](x))
+            h = torch.sin(self.fc[2*i+1](h))
+            temp = torch.eye(x.shape[-1],self.layers[i+1],dtype = self.dtype,device = dev)
+            x = h + x@temp
+        return self.fc[-1](x) 
+    def total_para(self):#计算参数数目
+        return sum([x.numel() for x in self.parameters()])   
+
+class LEN():
+    def __init__(self,bound,mu):
+        self.bound = bound
+        self.mu = mu
+        self.dx = self.bound[:,1] - self.bound[:,0]
+    def forward(self,X):
+        L = 1.0
+        x = (X[:,0] - self.bound[0,0])/self.dx[0]
+        y = (X[:,1] - self.bound[1,0])/self.dx[1]
+        Lx1 = 1 - (1 - x)**self.mu
+        Lx2 = 1 - x**self.mu
+        Ly1 = 1 - (1 - y)**self.mu
+        Ly2 = 1 - y**self.mu
+        L = L*Lx1*Lx2*Ly1*Ly2
+        return L.reshape(-1,1)
+def pred_y(nety,lenth,X):
+    return nety.forward(X)*lenth.forward(X) 
+
+def pred_u(netu,X):
+    return netu.forward(X)
+def loadtype(inset,teset,dtype):
+    inset.X = inset.X.type(dtype)
+    inset.yd = inset.yd.type(dtype)
+    inset.y_acc = inset.y_acc.type(dtype)
+    inset.u_acc = inset.u_acc.type(dtype)
+    inset.ff = inset.ff.type(dtype)
+    inset.lam = inset.lam.type(dtype)
+    
+    teset.X = teset.X.type(dtype)
+    teset.yd = teset.yd.type(dtype)
+    teset.y_acc = teset.y_acc.type(dtype)
+    teset.u_acc = teset.u_acc.type(dtype)
+    teset.ff = teset.ff.type(dtype)
+def loadcuda(inset,teset,nety,netu):    
+    nety = nety.to(device)
+    netu = netu.to(device)
+    
+    if inset.X.requires_grad == False:
+        inset.X.requires_grad = True
+    inset.X = inset.X.to(device)
+    inset.yd = inset.yd.to(device)
+    inset.ff = inset.ff.to(device)
+    inset.lam = inset.lam.to(device)
+    
+    teset.X = teset.X.to(device)
+    teset.yd = teset.yd.to(device)
+    
+    teset.ff = teset.ff.to(device)
+    
+def loadcpu(inset,teset,nety,netu):    
+    nety = nety.to('cpu')
+    netu = netu.to('cpu')
+    
+    inset.X = inset.X.to('cpu')
+    inset.yd = inset.yd.to('cpu')
+    inset.ff = inset.ff.to('cpu')
+    inset.lam = inset.lam.to('cpu')
+    
+    
+    teset.X = teset.X.to('cpu')
+    teset.yd = teset.yd.to('cpu')
+    
+    teset.ff = teset.ff.to('cpu')
+def L1_err(u_acc,u_pred):
+    u_acc = u_acc.to(device)
+    u_pred = u_pred.to(device)
+    tmp = abs(u_pred - u_acc)
+    return max(tmp)
+
+def error(u_pred, u_acc):
+    u_pred = u_pred.to(device)
+    u_acc = u_acc.to(device)
+    #return (((u_pred-u_acc)**2).sum()/(u_acc**2).sum()) ** (0.5)
+    return (((u_pred-u_acc)**2).mean()) ** (0.5)
+def loss_func_yp(nety,netu,lenth,inset):
+    inset.y = pred_y(nety,lenth,inset.X)
+    
+    inset.u = pred_u(netu,inset.X)
+    y_x, = torch.autograd.grad(inset.y, inset.X, create_graph=True, retain_graph=True,
+                               grad_outputs=torch.ones(inset.size,1).to(device))
+    y_xx, = torch.autograd.grad(y_x[:,0:1], inset.X, create_graph=True, retain_graph=True,
+                               grad_outputs=torch.ones(inset.size,1).to(device))
+    y_yy, = torch.autograd.grad(y_x[:,1:2], inset.X, create_graph=True, retain_graph=True,
+                               grad_outputs=torch.ones(inset.size,1).to(device))                                                      
+    y_lap = y_xx[:,0:1] + y_yy[:,1:2]
+    inset.res_y = (-y_lap + inset.y**3 - inset.u - inset.ff)
+    inset.ua = torch.relu(ua - inset.u)
+    inset.ub = torch.relu(inset.u - ub)
+    
+    inset.J = 0.5*((inset.y - inset.yd)**2 + alpha*inset.u**2).mean()*inset.area
+    
+    inset.F2 = (inset.res_y**2).mean()
+    inset.ua2 = (inset.ua**2).mean()
+    inset.ub2 = (inset.ub**2).mean()
+    line = (inset.lam[:,0:1]*inset.res_y + inset.lam[:,1:2]*inset.ua + inset.lam[:,2:3]*inset.ub).mean()*inset.area
+    nonline = 0.5*(inset.tau[0]*inset.F2 + inset.tau[1]*inset.ua2 + inset.tau[2]*inset.ub2)*inset.area
+    loss = inset.J + line + nonline
+    inset.du = -y_lap + inset.y**3 - inset.ff
+    inset.ddu = inset.res_y - y_lap + inset.y**3 - inset.ff
+    return loss
+def lam_para(inset,theta):
+    theta[1] = 0.5*(np.sqrt(theta[0]**4 + 4*theta[0]**2) - theta[0]**2)
+    tmp = theta[1]*(1 - theta[0])/theta[0]
+    temp = inset.lam[:,0:3]
+    inset.lam[:,0:3] = (inset.lam[:,0:3] + tmp*(inset.lam[:,0:3] - inset.lam[:,3:6])).detach()
+    inset.lam[:,3:6] = temp
+def grad_para(inset):#theta=[2,1]
+    
+    alpha = 2e3
+    inset.lam[:,0:1] = (inset.lam[:,0:1] + inset.tau[0]*inset.res_y).detach()
+    inset.lam[:,1:2] = (inset.lam[:,1:2] + inset.tau[1]*inset.ua).detach()
+    inset.lam[:,2:3] = (inset.lam[:,2:3] + inset.tau[2]*inset.ub).detach()
+    inset.tau[0] += alpha
+    inset.tau[1] += alpha
+    inset.tau[2] += alpha
+def train_yp(nety,netu,lenth,inset,optim,epoch):
+    print('Train y&p Neural Network')
+    loss = loss_func_yp(nety,netu,lenth,inset)
+    print('epoch_yp: %d, loss_yp: %.3e,loss_obj:%.3e, time: %.2f'
+          %(0, loss.item(),inset.J.item(), 0.00))
+    for it in range(epoch):
+        st = time.time()
+        def closure():
+            loss = loss_func_yp(nety,netu,lenth,inset)
+            optim.zero_grad()
+            loss.backward()
+            return loss
+        optim.step(closure) 
+        loss = loss_func_yp(nety,netu,lenth,inset)
+        loss_iu = (inset.ua2 + inset.ub2)
+        ela = time.time() - st
+        print('epoch_yp: %d, loss_yp: %.3e, loss_obj:%.3e,loss_pde:%.3e,loss_iu:%.3e, time: %.2f'
+              %((it+1), loss.item(), inset.J.item(),inset.F2.item()**(0.5),loss_iu.item(), ela))
+
+def KKT_loss(nety,netu, lenth, inset, error_history, record=True):    
+    # c is the step_size
+    if inset.X.requires_grad == False:
+        inset.X.requires_grad = True
+    loss = loss_func_yp(nety,netu,lenth,inset)
+    loss_obj = inset.J.item()
+    loss_ua = inset.ua2.item()
+    loss_ub = inset.ub2.item()
+    loss_pde = inset.F2.item()**(0.5)
+    if record:
+        KKT_loss_history, obj_value_history,pde_y_history = error_history
+        KKT_loss_history.append([loss_pde,loss_ua,loss_ub])
+        pde_y_history.append(loss_pde)
+        obj_value_history.append(loss_obj)
+        
+        error_history = [KKT_loss_history, obj_value_history,pde_y_history]
+    y_err = L1_err(inset.y_acc,pred_y(nety,lenth,inset.X))
+    u_err = L1_err(inset.u_acc,pred_u(netu,inset.X))
+    print('pde_y_loss: %.3e,y_err: %.3e, u_err: %.3e, obj_value: %.5f' \
+          %(loss_pde, y_err, u_err, inset.J.item()))
+    du_err = L1_err(inset.u_acc,inset.du)
+    ddu_err = L1_err(inset.u_acc,inset.ddu)
+    print('duerr:%.3e,dduerr:%.3e'%(du_err,ddu_err))
+    return error_history
+
+dtype = torch.float64
+nx_tr = [256,256]
+nx_te = [64,64]
+#mode = 'random'
+#mode = 'uniform'
+mode = 'qmc'
+inset = INSET(bound,nx_tr,mode)
+inset.lam = torch.zeros(inset.size,6)
+theta = [1,0]
+inset.tau = [5e3,1e3,1e3]
+
+teset = TESET(bound,nx_te)
+
+mu = 1
+lenth = LEN(bound,mu)
+
+lay_wid = 20
+layer_y = [2,lay_wid,lay_wid,lay_wid,1]
+layer_u = [2,lay_wid,lay_wid,lay_wid,1]
+dtype = torch.float64
+nety = Net(layer_y,dtype)
+netu = Net(layer_u,dtype)
+
+fname1 = "lay%d-ynet-box(%.2f)-var.pt"%(lay_wid,ua)
+fname2 = "lay%d-unet-box(%.2f)-var.pt"%(lay_wid,ua)
+
+#nety = torch.load(fname1)
+#netu = torch.load(fname2)
+lr = 1e0
+
+loadtype(inset,teset,dtype)
+loadcuda(inset,teset,nety,netu)
+
+#optimtype = 'LBFGS'
+optimtype = 'BFGS'
+loss_history = [[],[],[]]
+max_iters = 30
+
+start_time = time.time()
+epoch = 10 
+for i in range(max_iters):
+    print('\n    Iters: %d' %(i))
+    lam_para(inset,theta)
+    if optimtype == 'LBFGS':
+        optim = torch.optim.LBFGS(itertools.chain(nety.parameters(),
+                                                  netu.parameters()),
+                          lr=lr, max_iter=100,
+                          tolerance_grad=1e-16, tolerance_change=1e-16,
+                          line_search_fn='strong_wolfe')
+    else:
+        optim = bfgs.BFGS(itertools.chain(nety.parameters(),
+                                          netu.parameters()),
+                          lr=lr, max_iter=100,
+                          tolerance_grad=1e-16, tolerance_change=1e-16,
+                          line_search_fn='strong_wolfe')
+    if i == 0:
+        train_yp(nety,netu,lenth,inset,optim,10)
+    else:
+        train_yp(nety,netu,lenth,inset,optim,epoch)
+    loss_history = KKT_loss(nety,netu, lenth, inset, loss_history, record=True)
+    grad_para(inset)
+    if (i + 1)%1 == 0:
+        lr *= 0.985
+    if (i + 1)%4 == 0:
+        epoch += 1
+elapsed = time.time() - start_time
+torch.save(nety, fname1)
+torch.save(netu, fname2)
+
+print('Finishied! train time: %.2f\n' %(elapsed)) 
+
+loadcpu(inset,teset,nety,netu)
+torch.cuda.empty_cache()
+#%%
+KKT_loss_history, obj_value_history,pde_y_history = loss_history
+np.save('kktALM%dlay-%diter.npy'%(lay_wid,max_iters),KKT_loss_history)
+np.save('objALM%dlay-%diter.npy'%(lay_wid,max_iters),obj_value_history)
+np.save('pdeALMr%dlay-%diter.npy'%(lay_wid,max_iters),pde_y_history)
+
+fig, ax = plt.subplots(1,2,figsize=(12,3.5))
+
+ax[0].semilogy(np.array(KKT_loss_history))
+ax[0].legend(['pde_y_loss', 'loss_ua','loss_ub'])
+ax[0].set_xlabel('iters') 
+
+ax[1].plot(np.array(obj_value_history))
+ax[1].legend(['objective_value'])
+ax[1].set_xlabel('iters') 
+
+fig.tight_layout()
+plt.show()
+
+#%%
+nx_te_in = [64,64]
+x_train = np.linspace(bound[0,0],bound[0,1],nx_te_in[0])
+y_train = np.linspace(bound[1,0],bound[1,1],nx_te_in[1])
+
+X,Y= np.meshgrid(x_train,y_train)
+
+xx = np.hstack((X.reshape(-1,1), Y.reshape(-1,1)))
+xx = torch.from_numpy(xx).type(dtype)
+u_acc = UU(xx).numpy().reshape(nx_te_in[0],nx_te_in[1])
+#xiugai xx
+
+u_pred = pred_u(netu,xx).detach().numpy().reshape(nx_te_in[0],nx_te_in[1])
+
+err = u_acc - u_pred
+print('the test error:%.3e'%(max(abs(err.reshape(-1,1)))))
+fig = plt.figure(figsize=(15,5))
+
+ax = fig.add_subplot(1, 3, 1, projection='3d')
+ax.set_title('u_acc :test grid:%d'%(nx_te_in[0]))
+surf = ax.plot_surface(X, Y, u_acc, cmap='turbo', linewidth=1, antialiased=False)
+plt.colorbar(surf,ax=ax,fraction=0.03)
+ax.view_init(20, -120)
+
+ax = fig.add_subplot(1, 3, 2, projection='3d')
+ax.set_title('u_pred:test grid:%d'%(nx_te_in[0]))
+surf = ax.plot_surface(X, Y, u_pred, cmap='jet', linewidth=1, antialiased=False)
+plt.colorbar(surf,ax=ax,fraction=0.03)
+ax.view_init(20, -120)
+
+ax = fig.add_subplot(1, 3, 3, projection='3d')
+ax.set_title('err:test grid:%d'%(nx_te_in[0]))
+surf = ax.plot_surface(X, Y, err, cmap='jet', linewidth=1, antialiased=False)
+plt.colorbar(surf,ax=ax,fraction=0.03)
+ax.view_init(20, -120) 
+plt.show()
+#plt.suptitle(r'$\beta=0.032$')
+fig.savefig('3D.png')
+
+#%%
+fig, ax = plt.subplots(2,3,figsize=(12,7))
+ax = ax.reshape((2,3))
+for i in range(2):
+    for j in range(3):
+        ax[i,j].axis('equal')
+        ax[i,j].set_xlim([0,1])
+        ax[i,j].set_ylim([0,1])
+        ax[i,j].axis('off')
+        
+norm1 = cm.colors.Normalize(vmin=0, vmax=1)
+norm2 = cm.colors.Normalize(vmin=0.9, vmax=1.1)
+
+num_line = 10
+x_train = np.linspace(bound[0,0],bound[0,1],teset.nx[0])
+y_train = np.linspace(bound[1,0],bound[1,1],teset.nx[1])
+
+X,Y= np.meshgrid(x_train,y_train)
+u = pred_u(netu,teset.X).detach().numpy().reshape(teset.nx[0],teset.nx[1])
+y = pred_y(nety,lenth,teset.X).detach().numpy().reshape(teset.nx[0],teset.nx[1])
+u_e = teset.u_acc.numpy().reshape(teset.nx[0],teset.nx[1])
+y_e = teset.y_acc.numpy().reshape(teset.nx[0],teset.nx[1])
+
+ax00 = ax[0,0].contourf(X, Y, u, num_line, alpha=1, cmap='rainbow')
+ax[0,0].contour(ax00, linewidths=0.6, colors='black')
+ax01 = ax[0,1].contourf(X, Y, u_e, num_line, alpha=1, cmap='rainbow')
+ax[0,1].contour(ax01, linewidths=0.6, colors='black')
+
+ax02 = ax[0,2].contourf(X, Y, u-u_e, num_line, alpha=1, cmap='rainbow')
+ax[0,2].contour(ax02, linewidths=0.6, colors='black')
+fig.colorbar(ax00,ax=ax[0,0])
+fig.colorbar(ax01,ax=ax[0,1])
+fig.colorbar(ax02,ax=ax[0,2])
+ax[0,0].set_title('ALNN: u')
+ax[0,1].set_title('exact: u')
+ax[0,2].set_title('difference: u')
+
+ax10 = ax[1,0].contourf(X, Y, y, num_line, alpha=1, cmap='rainbow')
+ax[1,0].contour(ax10, linewidths=0.6, colors='black')
+ax11 = ax[1,1].contourf(X, Y, y_e, num_line, alpha=1, cmap='rainbow')
+ax[1,1].contour(ax11, linewidths=0.6, colors='black')
+ax12 = ax[1,2].contourf(X, Y, y-y_e, num_line, alpha=1, cmap='rainbow')
+ax[1,2].contour(ax12, linewidths=0.6, colors='black')
+fig.colorbar(ax10,ax=ax[1,0])
+fig.colorbar(ax11,ax=ax[1,1])
+fig.colorbar(ax12,ax=ax[1,2])
+ax[1,0].set_title('ALNN: y')
+ax[1,1].set_title('exact: y')
+ax[1,2].set_title('difference: y')
+fig.tight_layout()  # 防止子图重叠
+
+
+plt.show()
+fig.savefig('ALNN.png',dpi=300)
+
